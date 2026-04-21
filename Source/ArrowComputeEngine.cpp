@@ -106,21 +106,22 @@ public:
 } intermediates;
 
 static boss::Expression evaluate(boss::Expression&& e) {
+  using boss::utilities::experimental::sentinel::AnySequence_;
   static auto _ = compute::Initialize();
   return std::move(e) //
-      <"Slice" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+      <"Slice"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
         return intermediates.put(Declaration::Sequence(
             {intermediates.at(dynamics.at(0)),
              {"fetch", FetchNodeOptions(get<int>(dynamics.at(1)), get<int>(dynamics.at(2)))}}));
       } //
-  <"OrderBy" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"OrderBy"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto orderKeys = std::vector<compute::SortKey>();
     for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
       orderKeys.push_back(compute::SortKey(get<Symbol>(it).getName()));
     return intermediates.put(Declaration::Sequence(
         {intermediates.at(dynamics.at(0)), {"order_by", OrderByNodeOptions(Ordering(orderKeys))}}));
   } //
-  <"Join" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Join"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto leftKeys = std::vector<FieldRef>(), rightKeys = std::vector<FieldRef>();
     for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
       leftKeys.push_back(get<Symbol>(it).getName());
@@ -131,13 +132,13 @@ static boss::Expression evaluate(boss::Expression&& e) {
                               HashJoinNodeOptions(JoinType::INNER, leftKeys, rightKeys,
                                                   literal(true), "_l", "_r", true)});
   } //
-  <"Name" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Name"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
   } //
-  <"ByName" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"ByName"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     return intermediates.byName(get<boss::Symbol>(dynamics.at(0)));
   } //
-  <"Project" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Project"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto projections = std::vector<compute::Expression>();
     auto names = std::vector<std::string>();
     for(auto i = 1; i < dynamics.size(); i++)
@@ -173,7 +174,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
     return intermediates.put(Declaration::Sequence(
         {intermediates.at(dynamics.at(0)), {"project", ProjectNodeOptions(projections, names)}}));
   } //
-  <"GroupBy" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"GroupBy"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
     auto const aggregation = get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
     return intermediates.put(Declaration::Sequence(
@@ -184,10 +185,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
                   (dynamics.size() == 3 ? "hash_" : "") + aggregationFunction.getHead().getName(),
                   {aggregation.getName()},
                   aggregationFunction.getHead().getName() + "_" + aggregation.getName())},
-              dynamics.size() == 3 ? std::vector<FieldRef>{(get<Symbol>(dynamics.at(2)).getName())}
+              dynamics.size() == 3 ? std::vector<FieldRef> {(get<Symbol>(dynamics.at(2)).getName())}
                                    : std::vector<FieldRef>())}}));
   } //
-  <"Cumulate" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Cumulate"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
     auto const aggregationAttribute = get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
     auto input = (intermediates.getTable(intermediates.at(dynamics.at(0))));
@@ -201,7 +202,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                                         result->type()),
                                                   result))});
   } //
-  <"Pairwise" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Pairwise"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
     auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
     auto column = get<Symbol>(dynamics.at(2)).getName();
@@ -215,16 +216,16 @@ static boss::Expression evaluate(boss::Expression&& e) {
              input->num_columns(), field(get<Symbol>(dynamics.at(1)).getName(), result->type()),
              *ChunkedArray::Make({result->make_array()})))});
   } //
-  <"ToStatus" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"ToStatus"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     return DeclarationToStatus(intermediates.at(dynamics.at(0)), false).CodeAsString();
   } //
-  <"Materialize" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Materialize"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     return intermediates.put(
         {"table_source",
          TableSourceNodeOptions(
              *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks())});
   } //
-  <"Load" >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+  <"Load"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
     return std::visit(
         boss::utilities::overload(
             [](std::string&& path) -> boss::Expression {
@@ -247,8 +248,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
 };
 
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
-  auto result =
-      new BOSSExpression{.delegate = intermediates.convertResult(evaluate(std::move(e->delegate)))};
+  auto result = new BOSSExpression {
+      .delegate = intermediates.convertResult(evaluate(std::move(e->delegate)))};
   intermediates.collectGarbage();
   return result;
 };

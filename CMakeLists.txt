@@ -32,7 +32,7 @@ set(CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}" CACHE STRING
 
 include(ExternalProject)
 set(BOSS_SOURCE_BRANCH main CACHE STRING "if boss core is built from source, which thread should be fetched")
-set(BOSS_SOURCE_REPOSITORY https://github.com/boss-dms/BOSS.git CACHE STRING "url for the boss repository")
+set(BOSS_SOURCE_REPOSITORY https://github.com/symbol-store/BOSS.git CACHE STRING "url for the boss repository")
 ExternalProject_Add(BOSS
   GIT_REPOSITORY ${BOSS_SOURCE_REPOSITORY}
   DOWNLOAD_DIR $ENV{HOME}/.cmake-downloads/${CMAKE_PROJECT_NAME}

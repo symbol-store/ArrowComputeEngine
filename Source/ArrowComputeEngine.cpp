@@ -223,6 +223,60 @@ static boss::Expression evaluate(boss::Expression&& e) {
                {"table_source",
                 TableSourceNodeOptions(
                     *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks())});
+         } < "Table"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           auto fields = std::vector<std::shared_ptr<arrow::Field>>();
+           auto arrays = std::vector<std::shared_ptr<arrow::Array>>();
+           for(auto& columnExpr : dynamics) {
+             auto& column = get<ComplexExpression>(columnExpr);
+             auto columnName = column.getHead().getName();
+             auto addColumn = [&](auto& source) {
+               using Scalar =
+                   std::remove_const_t<typename std::decay_t<decltype(source)>::element_type>;
+               auto append = [&](auto& builder, auto type) {
+                 for(auto const& value : source)
+                   (void)builder.Append(value);
+                 arrays.push_back(*builder.Finish());
+                 fields.push_back(arrow::field(columnName, type));
+               };
+               if constexpr(std::is_same_v<Scalar, int64_t>) {
+                 arrow::Int64Builder builder;
+                 append(builder, arrow::int64());
+               } else if constexpr(std::is_same_v<Scalar, int32_t>) {
+                 arrow::Int32Builder builder;
+                 append(builder, arrow::int32());
+               } else if constexpr(std::is_same_v<Scalar, double_t>) {
+                 arrow::DoubleBuilder builder;
+                 append(builder, arrow::float64());
+               } else if constexpr(std::is_same_v<Scalar, float_t>) {
+                 arrow::FloatBuilder builder;
+                 append(builder, arrow::float32());
+               } else if constexpr(std::is_same_v<Scalar, std::string>) {
+                 arrow::StringBuilder builder;
+                 append(builder, arrow::utf8());
+               }
+             };
+             auto& spanArguments = column.getSpanArguments();
+             if(!spanArguments.empty()) {
+               std::visit(addColumn, spanArguments[0]);
+             } else {
+               auto& dynamicArguments = column.getDynamicArguments();
+               if(!dynamicArguments.empty()) {
+                 visit(boss::utilities::overload(
+                           [&]<typename T>(T const&)
+                               requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+                                 auto values = std::vector<T>(dynamicArguments.size());
+                                 for(auto i = 0u; i < dynamicArguments.size(); ++i)
+                                   values[i] = get<T>(dynamicArguments[i]);
+                                 auto span = boss::Span<T>(std::move(values));
+                                 addColumn(span);
+                               },
+                           [](auto&&) {}),
+                       dynamicArguments[0]);
+               }
+             }
+           }
+           return intermediates.put({"table_source", TableSourceNodeOptions(arrow::Table::Make(
+                                                         arrow::schema(fields), arrays))});
          } < "Load"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return std::visit(
                boss::utilities::overload(

@@ -33,17 +33,17 @@ class ColumnConverter {
 
 public:
   template <typename T> arrow::Status Visit(T& value) {
-    if constexpr(has_value<T>::value) {
+    if(!value.is_valid)
+      columnValues.push_back("NULL"_);
+    else if constexpr(has_value<T>::value) {
       if constexpr(std::is_convertible_v<decltype(value.value),
-                                         boss::expressions::AtomicExpression>) {
+                                         boss::expressions::AtomicExpression>)
         columnValues.push_back(value.value);
-      } else if constexpr(std::is_same_v<std::remove_reference_t<T>, arrow::StringScalar const>) {
-        columnValues.push_back(
-            (value.data() ? boss::Expression((char const*)value.data()) : "null"_));
-      } else {
+      else if constexpr(std::is_same_v<std::remove_reference_t<T>, arrow::StringScalar const>)
+        columnValues.push_back(boss::Expression((char const*)value.data()));
+      else
         columnValues.push_back("ArrowType"_(value.ToString()));
-      };
-    };
+    }
     return arrow::Status::OK();
   }
   boss::ExpressionArguments getColumnValues() && { return std::move(columnValues); };
@@ -232,46 +232,61 @@ static boss::Expression evaluate(boss::Expression&& e) {
              auto addColumn = [&](auto& source) {
                using Scalar =
                    std::remove_const_t<typename std::decay_t<decltype(source)>::element_type>;
-               auto append = [&](auto& builder, auto type) {
+               auto append = [&](auto&& builder, auto type) {
                  for(auto const& value : source)
                    (void)builder.Append(value);
                  arrays.push_back(*builder.Finish());
                  fields.push_back(arrow::field(columnName, type));
                };
-               if constexpr(std::is_same_v<Scalar, int64_t>) {
-                 arrow::Int64Builder builder;
-                 append(builder, arrow::int64());
-               } else if constexpr(std::is_same_v<Scalar, int32_t>) {
-                 arrow::Int32Builder builder;
-                 append(builder, arrow::int32());
-               } else if constexpr(std::is_same_v<Scalar, double_t>) {
-                 arrow::DoubleBuilder builder;
-                 append(builder, arrow::float64());
-               } else if constexpr(std::is_same_v<Scalar, float_t>) {
-                 arrow::FloatBuilder builder;
-                 append(builder, arrow::float32());
-               } else if constexpr(std::is_same_v<Scalar, std::string>) {
-                 arrow::StringBuilder builder;
-                 append(builder, arrow::utf8());
-               }
+               if constexpr(std::is_same_v<Scalar, int64_t>)
+                 append(arrow::Int64Builder {}, arrow::int64());
+               else if constexpr(std::is_same_v<Scalar, int32_t>)
+                 append(arrow::Int32Builder {}, arrow::int32());
+               else if constexpr(std::is_same_v<Scalar, double_t>)
+                 append(arrow::DoubleBuilder {}, arrow::float64());
+               else if constexpr(std::is_same_v<Scalar, float_t>)
+                 append(arrow::FloatBuilder {}, arrow::float32());
+               else if constexpr(std::is_same_v<Scalar, std::string>)
+                 append(arrow::StringBuilder{}, arrow::utf8());
+               else
+                 static_assert(!std::is_same_v<Scalar, Scalar>, "unsupported column type");
              };
              auto& spanArguments = column.getSpanArguments();
              if(!spanArguments.empty()) {
                std::visit(addColumn, spanArguments[0]);
              } else {
                auto& dynamicArguments = column.getDynamicArguments();
-               if(!dynamicArguments.empty()) {
+               auto firstNonNull =
+                   std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
+                                [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
+               if(firstNonNull != dynamicArguments.end()) {
                  visit(boss::utilities::overload(
                            [&]<typename T>(T const&)
                                requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
-                                 auto values = std::vector<T>(dynamicArguments.size());
-                                 for(auto i = 0u; i < dynamicArguments.size(); ++i)
-                                   values[i] = get<T>(dynamicArguments[i]);
-                                 auto span = boss::Span<T>(std::move(values));
-                                 addColumn(span);
+                                 auto appendWithNulls = [&](auto&& builder, auto type) {
+                                   for(auto& argument : dynamicArguments)
+                                     if(std::holds_alternative<Symbol>(argument))
+                                       (void)builder.AppendNull();
+                                     else
+                                       (void)builder.Append(get<T>(argument));
+                                   arrays.push_back(*builder.Finish());
+                                   fields.push_back(arrow::field(columnName, type));
+                                 };
+                                 if constexpr(std::is_same_v<T, int64_t>)
+                                   appendWithNulls(arrow::Int64Builder {}, arrow::int64());
+                                 else if constexpr(std::is_same_v<T, int32_t>)
+                                   appendWithNulls(arrow::Int32Builder {}, arrow::int32());
+                                 else if constexpr(std::is_same_v<T, double_t>)
+                                   appendWithNulls(arrow::DoubleBuilder {}, arrow::float64());
+                                 else if constexpr(std::is_same_v<T, float_t>)
+                                   appendWithNulls(arrow::FloatBuilder {}, arrow::float32());
+                                 else if constexpr(std::is_same_v<T, std::string>)
+                                   appendWithNulls(arrow::StringBuilder {}, arrow::utf8());
+                                 else
+                                   static_assert(!std::is_same_v<T, T>, "unsupported column type");
                                },
                            [](auto&&) {}),
-                       dynamicArguments[0]);
+                       *firstNonNull);
                }
              }
            }

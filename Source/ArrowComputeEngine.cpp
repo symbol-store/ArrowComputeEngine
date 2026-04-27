@@ -43,7 +43,8 @@ public:
         columnValues.push_back(boss::Expression((char const*)value.data()));
       else
         columnValues.push_back("ArrowType"_(value.ToString()));
-    }
+    } else
+      columnValues.push_back("ArrowType"_(value.ToString()));
     return arrow::Status::OK();
   }
   boss::ExpressionArguments getColumnValues() && { return std::move(columnValues); };
@@ -104,6 +105,16 @@ public:
       intermediates.erase(key);
   }
 } intermediates;
+
+template <typename T, typename F>
+static void withBuilder(F&& use) {
+  if constexpr(std::is_same_v<T, int64_t>) use(arrow::Int64Builder{}, arrow::int64());
+  else if constexpr(std::is_same_v<T, int32_t>) use(arrow::Int32Builder{}, arrow::int32());
+  else if constexpr(std::is_same_v<T, double_t>) use(arrow::DoubleBuilder{}, arrow::float64());
+  else if constexpr(std::is_same_v<T, float_t>) use(arrow::FloatBuilder{}, arrow::float32());
+  else if constexpr(std::is_same_v<T, std::string>) use(arrow::StringBuilder{}, arrow::utf8());
+  else throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
+}
 
 static boss::Expression evaluate(boss::Expression&& e) {
   using boss::utilities::experimental::sentinel::AnySequence_;
@@ -229,65 +240,53 @@ static boss::Expression evaluate(boss::Expression&& e) {
            for(auto& columnExpr : dynamics) {
              auto& column = get<ComplexExpression>(columnExpr);
              auto columnName = column.getHead().getName();
-             auto addColumn = [&](auto& source) {
-               using Scalar =
-                   std::remove_const_t<typename std::decay_t<decltype(source)>::element_type>;
-               auto append = [&](auto&& builder, auto type) {
-                 for(auto const& value : source)
-                   (void)builder.Append(value);
-                 arrays.push_back(*builder.Finish());
-                 fields.push_back(arrow::field(columnName, type));
-               };
-               if constexpr(std::is_same_v<Scalar, int64_t>)
-                 append(arrow::Int64Builder {}, arrow::int64());
-               else if constexpr(std::is_same_v<Scalar, int32_t>)
-                 append(arrow::Int32Builder {}, arrow::int32());
-               else if constexpr(std::is_same_v<Scalar, double_t>)
-                 append(arrow::DoubleBuilder {}, arrow::float64());
-               else if constexpr(std::is_same_v<Scalar, float_t>)
-                 append(arrow::FloatBuilder {}, arrow::float32());
-               else if constexpr(std::is_same_v<Scalar, std::string>)
-                 append(arrow::StringBuilder{}, arrow::utf8());
-               else
-                 static_assert(!std::is_same_v<Scalar, Scalar>, "unsupported column type");
-             };
              auto& spanArguments = column.getSpanArguments();
              if(!spanArguments.empty()) {
-               std::visit(addColumn, spanArguments[0]);
+               auto firstTyped = std::find_if(spanArguments.begin(), spanArguments.end(),
+                   [](auto const& span) {
+                     return std::visit([](auto const& s) {
+                       return !std::is_same_v<Symbol, std::remove_const_t<
+                           typename std::decay_t<decltype(s)>::element_type>>;
+                     }, span);
+                   });
+               if(firstTyped != spanArguments.end())
+                 std::visit([&](auto& typedSource) {
+                   using Scalar = std::remove_const_t<
+                       typename std::decay_t<decltype(typedSource)>::element_type>;
+                   auto append = [&](auto&& builder, auto type) {
+                     for(auto& spanArg : spanArguments)
+                       std::visit([&](auto& source) {
+                         using SourceScalar = std::remove_const_t<
+                             typename std::decay_t<decltype(source)>::element_type>;
+                         if constexpr(std::is_same_v<SourceScalar, Symbol>)
+                           for(auto i = 0u; i < source.size(); ++i) (void)builder.AppendNull();
+                         else if constexpr(std::is_same_v<SourceScalar, Scalar>)
+                           for(auto const& value : source) (void)builder.Append(value);
+                       }, spanArg);
+                     arrays.push_back(*builder.Finish());
+                     fields.push_back(arrow::field(columnName, type));
+                   };
+                   withBuilder<Scalar>(append);
+                 }, *firstTyped);
              } else {
                auto& dynamicArguments = column.getDynamicArguments();
-               auto firstNonNull =
-                   std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
-                                [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
-               if(firstNonNull != dynamicArguments.end()) {
+               auto firstNonNull = std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
+                   [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
+               if(firstNonNull != dynamicArguments.end())
                  visit(boss::utilities::overload(
-                           [&]<typename T>(T const&)
-                               requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
-                                 auto appendWithNulls = [&](auto&& builder, auto type) {
-                                   for(auto& argument : dynamicArguments)
-                                     if(std::holds_alternative<Symbol>(argument))
-                                       (void)builder.AppendNull();
-                                     else
-                                       (void)builder.Append(get<T>(argument));
-                                   arrays.push_back(*builder.Finish());
-                                   fields.push_back(arrow::field(columnName, type));
-                                 };
-                                 if constexpr(std::is_same_v<T, int64_t>)
-                                   appendWithNulls(arrow::Int64Builder {}, arrow::int64());
-                                 else if constexpr(std::is_same_v<T, int32_t>)
-                                   appendWithNulls(arrow::Int32Builder {}, arrow::int32());
-                                 else if constexpr(std::is_same_v<T, double_t>)
-                                   appendWithNulls(arrow::DoubleBuilder {}, arrow::float64());
-                                 else if constexpr(std::is_same_v<T, float_t>)
-                                   appendWithNulls(arrow::FloatBuilder {}, arrow::float32());
-                                 else if constexpr(std::is_same_v<T, std::string>)
-                                   appendWithNulls(arrow::StringBuilder {}, arrow::utf8());
-                                 else
-                                   static_assert(!std::is_same_v<T, T>, "unsupported column type");
-                               },
-                           [](auto&&) {}),
-                       *firstNonNull);
-               }
+                     [&]<typename T>(T const&)
+                         requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+                       auto append = [&](auto&& builder, auto type) {
+                         for(auto& argument : dynamicArguments)
+                           if(std::holds_alternative<Symbol>(argument)) (void)builder.AppendNull();
+                           else (void)builder.Append(get<T>(argument));
+                         arrays.push_back(*builder.Finish());
+                         fields.push_back(arrow::field(columnName, type));
+                       };
+                       withBuilder<T>(append);
+                     },
+                     [](auto&&) {}),
+                 *firstNonNull);
              }
            }
            return intermediates.put({"table_source", TableSourceNodeOptions(arrow::Table::Make(

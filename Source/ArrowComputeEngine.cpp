@@ -106,17 +106,48 @@ public:
   }
 } intermediates;
 
-template <typename T, typename F>
-static void withBuilder(F&& use) {
-  if constexpr(std::is_same_v<T, int64_t>) use(arrow::Int64Builder{}, arrow::int64());
-  else if constexpr(std::is_same_v<T, int32_t>) use(arrow::Int32Builder{}, arrow::int32());
-  else if constexpr(std::is_same_v<T, double_t>) use(arrow::DoubleBuilder{}, arrow::float64());
-  else if constexpr(std::is_same_v<T, float_t>) use(arrow::FloatBuilder{}, arrow::float32());
-  else if constexpr(std::is_same_v<T, std::string>) use(arrow::StringBuilder{}, arrow::utf8());
-  else throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
+static compute::Expression toComputeExpression(boss::Expression const& e) {
+  return std::visit(
+      boss::utilities::overload([](Symbol const& s) { return compute::field_ref(s.getName()); },
+                                [](bool v) { return compute::literal(v); },
+                                [](int64_t v) { return compute::literal(v); },
+                                [](int32_t v) { return compute::literal(v); },
+                                [](double_t v) { return compute::literal(v); },
+                                [](float_t v) { return compute::literal(v); },
+                                [](std::string const& s) {
+                                  return compute::literal(std::make_shared<arrow::StringScalar>(s));
+                                },
+                                [](ComplexExpression const& ce) {
+                                  auto args = std::vector<compute::Expression>();
+                                  for(auto const& arg : ce.getDynamicArguments())
+                                    args.push_back(toComputeExpression(arg));
+                                  auto name = ce.getHead().getName();
+                                  std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                                  return compute::call(name, args);
+                                },
+                                [](auto const&) -> compute::Expression {
+                                  throw std::runtime_error("unsupported filter expression");
+                                }),
+      e);
+}
+
+template <typename T, typename F> static void withBuilder(F&& use) {
+  if constexpr(std::is_same_v<T, int64_t>)
+    use(arrow::Int64Builder {}, arrow::int64());
+  else if constexpr(std::is_same_v<T, int32_t>)
+    use(arrow::Int32Builder {}, arrow::int32());
+  else if constexpr(std::is_same_v<T, double_t>)
+    use(arrow::DoubleBuilder {}, arrow::float64());
+  else if constexpr(std::is_same_v<T, float_t>)
+    use(arrow::FloatBuilder {}, arrow::float32());
+  else if constexpr(std::is_same_v<T, std::string>)
+    use(arrow::StringBuilder {}, arrow::utf8());
+  else
+    throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
 }
 
 static boss::Expression evaluate(boss::Expression&& e) {
+  using boss::utilities::experimental::sentinel::Any_;
   using boss::utilities::experimental::sentinel::AnySequence_;
   static auto _ = compute::Initialize();
   return std::move(e) //
@@ -146,6 +177,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
            return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
          } < "ByName"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return intermediates.byName(get<boss::Symbol>(dynamics.at(0)));
+         } < "Filter"_(Any_, Any_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           return intermediates.put(Declaration::Sequence(
+               {intermediates.at(dynamics.at(0)),
+                {"filter", FilterNodeOptions(toComputeExpression(dynamics.at(1)))}}));
          } < "Project"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto projections = std::vector<compute::Expression>();
            auto names = std::vector<std::string>();
@@ -157,26 +192,20 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        },
                        [&](ComplexExpression&& s) {
                          auto arguments = std::vector<compute::Expression>();
-                         for(auto& it :
-                             s.getDynamicArguments()) { // TODO: implement deeply nested expressions
-                           visit(boss::utilities::overload(
-                                     [&arguments](Symbol const&& s) {
-                                       arguments.push_back(compute::field_ref(s.getName()));
-                                     },
-                                     [&arguments](int const&& s) {
-                                       arguments.push_back(compute::literal(s));
-                                     },
-                                     [](auto&& s) { __builtin_trap(); }),
-                                 std::move(it));
-                         };
+                         for(auto const& it : s.getDynamicArguments())
+                           arguments.push_back(toComputeExpression(it));
                          projections.push_back(
-                             s.getHead().getName() == "int"
+                             s.getHead().getName() ==
+                                     "int" // expressions like "int"_(19.4) need to be translated to
+                                           // a low-level cast in arrow compute as cast is not
+                                           // exposed as a function
                                  ? compute::call("cast", arguments,
                                                  compute::CastOptions::Unsafe(int32()))
                                  : compute::call(s.getHead().getName(), arguments));
                          names.push_back(
                              s.getHead().getName() == "int"
-                                 ? "int(" + arguments.back().ToString() + ")"
+                                 ? "int(" + arguments.back().ToString() +
+                                       ")" // casts are named explicitly
                                  : compute::call(s.getHead().getName(), arguments).ToString());
                        },
                        [](auto&&) {}),
@@ -242,51 +271,62 @@ static boss::Expression evaluate(boss::Expression&& e) {
              auto columnName = column.getHead().getName();
              auto& spanArguments = column.getSpanArguments();
              if(!spanArguments.empty()) {
-               auto firstTyped = std::find_if(spanArguments.begin(), spanArguments.end(),
-                   [](auto const& span) {
-                     return std::visit([](auto const& s) {
-                       return !std::is_same_v<Symbol, std::remove_const_t<
-                           typename std::decay_t<decltype(s)>::element_type>>;
-                     }, span);
+               auto firstTyped =
+                   std::find_if(spanArguments.begin(), spanArguments.end(), [](auto const& span) {
+                     return std::visit(
+                         [](auto const& s) {
+                           return !std::is_same_v<Symbol, std::remove_const_t<typename std::decay_t<
+                                                              decltype(s)>::element_type>>;
+                         },
+                         span);
                    });
                if(firstTyped != spanArguments.end())
-                 std::visit([&](auto& typedSource) {
-                   using Scalar = std::remove_const_t<
-                       typename std::decay_t<decltype(typedSource)>::element_type>;
-                   auto append = [&](auto&& builder, auto type) {
-                     for(auto& spanArg : spanArguments)
-                       std::visit([&](auto& source) {
-                         using SourceScalar = std::remove_const_t<
-                             typename std::decay_t<decltype(source)>::element_type>;
-                         if constexpr(std::is_same_v<SourceScalar, Symbol>)
-                           for(auto i = 0u; i < source.size(); ++i) (void)builder.AppendNull();
-                         else if constexpr(std::is_same_v<SourceScalar, Scalar>)
-                           for(auto const& value : source) (void)builder.Append(value);
-                       }, spanArg);
-                     arrays.push_back(*builder.Finish());
-                     fields.push_back(arrow::field(columnName, type));
-                   };
-                   withBuilder<Scalar>(append);
-                 }, *firstTyped);
-             } else {
-               auto& dynamicArguments = column.getDynamicArguments();
-               auto firstNonNull = std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
-                   [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
-               if(firstNonNull != dynamicArguments.end())
-                 visit(boss::utilities::overload(
-                     [&]<typename T>(T const&)
-                         requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+                 std::visit(
+                     [&](auto& typedSource) {
+                       using Scalar = std::remove_const_t<
+                           typename std::decay_t<decltype(typedSource)>::element_type>;
                        auto append = [&](auto&& builder, auto type) {
-                         for(auto& argument : dynamicArguments)
-                           if(std::holds_alternative<Symbol>(argument)) (void)builder.AppendNull();
-                           else (void)builder.Append(get<T>(argument));
+                         for(auto& spanArg : spanArguments)
+                           std::visit(
+                               [&](auto& source) {
+                                 using SourceScalar = std::remove_const_t<
+                                     typename std::decay_t<decltype(source)>::element_type>;
+                                 if constexpr(std::is_same_v<SourceScalar, Symbol>)
+                                   for(auto i = 0u; i < source.size(); ++i)
+                                     (void)builder.AppendNull();
+                                 else if constexpr(std::is_same_v<SourceScalar, Scalar>)
+                                   for(auto const& value : source)
+                                     (void)builder.Append(value);
+                               },
+                               spanArg);
                          arrays.push_back(*builder.Finish());
                          fields.push_back(arrow::field(columnName, type));
                        };
-                       withBuilder<T>(append);
+                       withBuilder<Scalar>(append);
                      },
-                     [](auto&&) {}),
-                 *firstNonNull);
+                     *firstTyped);
+             } else {
+               auto& dynamicArguments = column.getDynamicArguments();
+               auto firstNonNull =
+                   std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
+                                [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
+               if(firstNonNull != dynamicArguments.end())
+                 visit(boss::utilities::overload(
+                           [&]<typename T>(T const&)
+                               requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
+                                 auto append = [&](auto&& builder, auto type) {
+                                   for(auto& argument : dynamicArguments)
+                                     if(std::holds_alternative<Symbol>(argument))
+                                       (void)builder.AppendNull();
+                                     else
+                                       (void)builder.Append(get<T>(argument));
+                                   arrays.push_back(*builder.Finish());
+                                   fields.push_back(arrow::field(columnName, type));
+                                 };
+                                 withBuilder<T>(append);
+                               },
+                           [](auto&&) {}),
+                       *firstNonNull);
              }
            }
            return intermediates.put({"table_source", TableSourceNodeOptions(arrow::Table::Make(

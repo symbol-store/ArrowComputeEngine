@@ -211,18 +211,24 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        },
                        [&](ComplexExpression&& s) {
                          auto headName = s.getHead().getName();
-                         auto arguments = std::vector<compute::Expression>();
-                         for(auto const& it : s.getDynamicArguments())
-                           arguments.push_back(toComputeExpression(it));
-                         // "int"_(x) maps to a cast — Arrow compute doesn't expose cast by name
-                         auto expr = headName == "int"
-                                         ? compute::call("cast", arguments,
-                                                         compute::CastOptions::Unsafe(int32()))
-                                         : compute::call(headName, arguments);
-                         projections.push_back(expr);
-                         names.push_back(headName == "int"
-                                             ? "int(" + arguments.back().ToString() + ")"
-                                             : expr.ToString());
+                         auto const& args = s.getDynamicArguments();
+                         if(headName == "as") {
+                           projections.push_back(toComputeExpression(args.at(0)));
+                           names.push_back(get<Symbol>(args.at(1)).getName());
+                         } else {
+                           auto arguments = std::vector<compute::Expression>();
+                           for(auto const& it : args)
+                             arguments.push_back(toComputeExpression(it));
+                           // "int"_(x) maps to a cast — Arrow compute doesn't expose cast by name
+                           auto expr = headName == "int"
+                                           ? compute::call("cast", arguments,
+                                                           compute::CastOptions::Unsafe(int32()))
+                                           : compute::call(headName, arguments);
+                           projections.push_back(expr);
+                           names.push_back(headName == "int"
+                                               ? "int(" + arguments.back().ToString() + ")"
+                                               : expr.ToString());
+                         }
                        },
                        [](auto&&) {}),
                    std::move(dynamics.at(i)));
@@ -241,8 +247,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                aggregates.emplace_back(fn.getHead().getName(), fn.getHead().getName() + "()");
              } else {
                auto const col = get<Symbol>(args.at(0));
-               aggregates.push_back({fn.getHead().getName(),
-                                     col.getName(),
+               aggregates.push_back({fn.getHead().getName(), col.getName(),
                                      fn.getHead().getName() + "(" + col.getName() + ")"});
              }
            }

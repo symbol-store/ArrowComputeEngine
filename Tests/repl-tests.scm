@@ -48,6 +48,19 @@
         '(Table (A 1 2) (B 3 4))
         (boss-eval (Project (Table (A 1 2) (B 3 4) (C 5 6)) A B)))
 
+  (test "Project: column alias with (as expr name)"
+        '(Table (revenue 90.0 180.0))
+        (boss-eval
+          (Project (Table (price 100 200) (discount 0.1 0.1))
+                   (as (multiply price (subtract 1.0 discount)) revenue))))
+
+  (test "Project: mix of plain columns and aliases"
+        '(Table (price 100 200) (revenue 90.0 180.0))
+        (boss-eval
+          (Project (Table (price 100 200) (discount 0.1 0.1))
+                   price
+                   (as (multiply price (subtract 1.0 discount)) revenue))))
+
   ;;; Slice
 
   (test "Slice: offset 0"
@@ -249,6 +262,97 @@
         (begin
           (boss-eval (Name (Table (orderkey 1 1 2) (quantity 5 10 5)) orders))
           (boss-eval (GroupBy (Filter (ByName orders) (Equal orderkey 1)) (sum quantity)))))
+
+  ;; Q1: sum + count_all grouped by two keys, ordered
+  ;; rows: (q=5,rf=1,ls=1),(q=5,rf=1,ls=1),(q=20,rf=1,ls=2),(q=15,rf=2,ls=1)
+  ;; groups (rf,ls): (1,1)→sum=10,count=2  (1,2)→sum=20,count=1  (2,1)→sum=15,count=1
+  (test "Q1: sum + count_all by two keys"
+        '(Table (returnflag 1 1 2) (linestatus 1 2 1) (|sum(quantity)| 10 20 15) (|count_all()| 2 1 1))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (Table (quantity 5 5 20 15) (returnflag 1 1 1 2) (linestatus 1 1 2 1))
+              (sum quantity) (count_all) returnflag linestatus)
+            (keys returnflag linestatus))))
+
+  ;; Q3: join orders + lineitems (distinct key names → no _l/_r suffix), group by orderkey, order by revenue desc
+  ;; join: o_ok=1→ep 100+200=300, o_ok=2→ep=200, o_ok=3→ep=50
+  (test "Q3: join + groupby orderkey + order by revenue desc"
+        '(Table (o_orderkey 1 2 3) (|sum(extendedprice)| 300 200 50))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (Join (Table (o_orderkey 1 2 3) (custkey 1 1 2)) (keys o_orderkey)
+                    (Table (l_orderkey 1 1 2 3) (extendedprice 100 200 200 50)) (keys l_orderkey))
+              (sum extendedprice) o_orderkey)
+            (keys (desc |sum(extendedprice)|)))))
+
+  ;; Q10: multi-key groupby ordered by sum desc
+  ;; groups: (cust=1,name=1)→100, (cust=2,name=2)→50, (cust=3,name=3)→300
+  (test "Q10: multi-key groupby + order by sum desc"
+        '(Table (custkey 3 1 2) (name 3 1 2) (|sum(amount)| 300 100 50))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (Table (custkey 1 1 2 3) (name 1 1 2 3) (amount 60 40 50 300))
+              (sum amount) custkey name)
+            (keys (desc |sum(amount)|)))))
+
+  ;; Q13: LeftJoin then count orders per customer; customer 3 has no orders → count=0
+  (test "Q13: LeftJoin + count(nullable) per customer"
+        '(Table (custkey_l 1 2 3) (|count(orderkey)| 2 1 0))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (LeftJoin
+                (Table (custkey 1 2 3)) (keys custkey)
+                (Table (custkey 1 1 2) (orderkey 10 20 30)) (keys custkey))
+              (count orderkey) custkey_l)
+            (keys custkey_l))))
+
+  ;; Q16: AntiJoin to exclude disqualified suppliers, count_all by brand, order desc
+  ;; parts with suppkey=3 removed; brand=1 has 2 left, brand=2 has 1 left
+  (test "Q16: AntiJoin + count_all by brand ordered desc"
+        '(Table (brand 1 2) (|count_all()| 2 1))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (AntiJoin
+                (Table (suppkey 1 2 3 3 4) (brand 1 1 1 2 2)) (keys suppkey)
+                (Table (suppkey 3)) (keys suppkey))
+              (count_all) brand)
+            (keys (desc |count_all()|)))))
+
+  ;; Q18: HAVING via Filter-after-GroupBy stored with Name; semi-join lineitems to qualifying orders
+  ;; heavy orders: orderkey=1 (sum=15 > 10); join filters lineitems; sum quantity per customer
+  (test "Q18: HAVING subquery + semi-join + groupby + order desc"
+        '(Table (custkey 1) (|sum(quantity)| 15))
+        (begin
+          (boss-eval (Name
+            (Filter
+              (GroupBy (Table (orderkey 1 1 2) (quantity 8 7 3)) (sum quantity) orderkey)
+              (Greater |sum(quantity)| 10))
+            q18_heavy))
+          (boss-eval
+            (OrderBy
+              (GroupBy
+                (Join (Table (orderkey 1 1 2) (custkey 1 1 2) (quantity 8 7 3)) (keys orderkey)
+                      (ByName q18_heavy) (keys orderkey))
+                (sum quantity) custkey)
+              (keys (desc |sum(quantity)|))))))
+
+  ;; Q21: AntiJoin to remove problem suppliers, count_all per region, order desc
+  ;; suppkey=2 excluded; region=1 has sk=1,3 left (2), region=2 has sk=4,5,6 left (3)
+  (test "Q21: AntiJoin + count_all by region ordered desc"
+        '(Table (region 2 1) (|count_all()| 3 2))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (AntiJoin
+                (Table (suppkey 1 2 3 4 5 6) (region 1 1 1 2 2 2)) (keys suppkey)
+                (Table (suppkey 2)) (keys suppkey))
+              (count_all) region)
+            (keys (desc |count_all()|)))))
 
 )
 

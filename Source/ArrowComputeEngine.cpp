@@ -55,7 +55,7 @@ static class {
   std::unordered_map<boss::Symbol, size_t> names;
 
   int64_t generateID() {
-    static std::default_random_engine generator;
+    static std::default_random_engine generator(std::random_device{}());
     return std::uniform_int_distribution<int64_t>(LONG_LONG_MIN, LONG_LONG_MAX)(generator);
   };
 
@@ -66,12 +66,12 @@ public:
   }
   int64_t byName(boss::Symbol name) { return names.at(name); }
 
-  int64_t put(Declaration table) {
+  int64_t put(Declaration&& table) {
     auto id = generateID();
-    intermediates[id] = table;
+    intermediates[id] = std::move(table);
     return id;
   };
-  Declaration at(boss::Expression const& key) { return intermediates.at(std::get<int64_t>(key)); }
+  Declaration const& at(boss::Expression const& key) { return intermediates.at(std::get<int64_t>(key)); }
 
   boss::Expression convertResult(boss::Expression const& key) {
     if(!std::holds_alternative<int64_t>(key))
@@ -96,13 +96,10 @@ public:
   };
 
   void collectGarbage() {
-    auto keysToDelete = std::set<size_t>();
-    for(auto& [key, value] : intermediates)
-      keysToDelete.insert(key);
+    auto live = std::set<size_t>();
     for(auto& [name, key] : names)
-      keysToDelete.erase(key);
-    for(auto& key : keysToDelete)
-      intermediates.erase(key);
+      live.insert(key);
+    std::erase_if(intermediates, [&](auto& kv) { return !live.count(kv.first); });
   }
 } intermediates;
 
@@ -126,7 +123,7 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
                                   return compute::call(name, args);
                                 },
                                 [](auto const&) -> compute::Expression {
-                                  throw std::runtime_error("unsupported filter expression");
+                                  throw std::runtime_error("unsupported compute expression");
                                 }),
       e);
 }
@@ -191,22 +188,19 @@ static boss::Expression evaluate(boss::Expression&& e) {
                          names.push_back(s.getName());
                        },
                        [&](ComplexExpression&& s) {
+                         auto headName = s.getHead().getName();
                          auto arguments = std::vector<compute::Expression>();
                          for(auto const& it : s.getDynamicArguments())
                            arguments.push_back(toComputeExpression(it));
-                         projections.push_back(
-                             s.getHead().getName() ==
-                                     "int" // expressions like "int"_(19.4) need to be translated to
-                                           // a low-level cast in arrow compute as cast is not
-                                           // exposed as a function
-                                 ? compute::call("cast", arguments,
-                                                 compute::CastOptions::Unsafe(int32()))
-                                 : compute::call(s.getHead().getName(), arguments));
-                         names.push_back(
-                             s.getHead().getName() == "int"
-                                 ? "int(" + arguments.back().ToString() +
-                                       ")" // casts are named explicitly
-                                 : compute::call(s.getHead().getName(), arguments).ToString());
+                         // "int"_(x) maps to a cast — Arrow compute doesn't expose cast by name
+                         auto expr = headName == "int"
+                                         ? compute::call("cast", arguments,
+                                                         compute::CastOptions::Unsafe(int32()))
+                                         : compute::call(headName, arguments);
+                         projections.push_back(expr);
+                         names.push_back(headName == "int"
+                                             ? "int(" + arguments.back().ToString() + ")"
+                                             : expr.ToString());
                        },
                        [](auto&&) {}),
                    std::move(dynamics.at(i)));

@@ -149,6 +149,26 @@
           (boss-eval (Name (Table (A 1 2 3)) testTable))
           (boss-eval (ByName testTable))))
 
+  ;;; Join
+
+  (test "Join: inner — matching rows only (key columns get _l/_r suffix)"
+        '(Table (id_l 1 2) (val 10 20) (id_r 1 2) (score 100 200))
+        (boss-eval
+          (Join (Table (id 1 2 3) (val 10 20 30)) (keys id)
+                (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+
+  (test "LeftJoin: keeps all left rows, NULL for unmatched right"
+        '(Table (id_l 1 2 3) (val 10 20 30) (id_r 1 2 NULL) (score 100 200 NULL))
+        (boss-eval
+          (LeftJoin (Table (id 1 2 3) (val 10 20 30)) (keys id)
+                    (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+
+  (test "AntiJoin: left rows with no match in right"
+        '(Table (id 3) (val 30))
+        (boss-eval
+          (AntiJoin (Table (id 1 2 3) (val 10 20 30)) (keys id)
+                    (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+
   ;;; Composition
 
   (test "Filter then OrderBy"

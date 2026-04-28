@@ -55,7 +55,7 @@ static class {
   std::unordered_map<boss::Symbol, size_t> names;
 
   int64_t generateID() {
-    static std::default_random_engine generator(std::random_device{}());
+    static std::default_random_engine generator(std::random_device {}());
     return std::uniform_int_distribution<int64_t>(LONG_LONG_MIN, LONG_LONG_MAX)(generator);
   };
 
@@ -71,7 +71,12 @@ public:
     intermediates[id] = std::move(table);
     return id;
   };
-  Declaration const& at(boss::Expression const& key) { return intermediates.at(std::get<int64_t>(key)); }
+  int64_t putTable(std::shared_ptr<arrow::Table> table) {
+    return put({"table_source", TableSourceNodeOptions(std::move(table))});
+  };
+  Declaration const& at(boss::Expression const& key) {
+    return intermediates.at(std::get<int64_t>(key));
+  }
 
   boss::Expression convertResult(boss::Expression const& key) {
     if(!std::holds_alternative<int64_t>(key))
@@ -143,6 +148,18 @@ template <typename T, typename F> static void withBuilder(F&& use) {
     throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
 }
 
+static int64_t buildJoin(JoinType joinType, boss::expressions::ExpressionArguments& dynamics) {
+  auto leftKeys = std::vector<FieldRef>(), rightKeys = std::vector<FieldRef>();
+  for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
+    leftKeys.push_back(get<Symbol>(it).getName());
+  for(auto& it : get<ComplexExpression>(dynamics.at(3)).getDynamicArguments())
+    rightKeys.push_back(get<Symbol>(it).getName());
+  return intermediates.put(
+      {"hashjoin",
+       {intermediates.at(dynamics.at(0)), intermediates.at(dynamics.at(2))},
+       HashJoinNodeOptions(joinType, leftKeys, rightKeys, literal(true), "_l", "_r", true)});
+}
+
 static boss::Expression evaluate(boss::Expression&& e) {
   using boss::utilities::experimental::sentinel::Any_;
   using boss::utilities::experimental::sentinel::AnySequence_;
@@ -170,16 +187,11 @@ static boss::Expression evaluate(boss::Expression&& e) {
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"order_by", OrderByNodeOptions(Ordering(orderKeys))}}));
          } < "Join"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           auto leftKeys = std::vector<FieldRef>(), rightKeys = std::vector<FieldRef>();
-           for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
-             leftKeys.push_back(get<Symbol>(it).getName());
-           for(auto& it : get<ComplexExpression>(dynamics.at(3)).getDynamicArguments())
-             rightKeys.push_back(get<Symbol>(it).getName());
-           return intermediates.put(
-               {"hashjoin",
-                {intermediates.at(dynamics.at(0)), intermediates.at(dynamics.at(2))},
-                HashJoinNodeOptions(JoinType::INNER, leftKeys, rightKeys, literal(true), "_l", "_r",
-                                    true)});
+           return buildJoin(JoinType::INNER, dynamics);
+         } < "LeftJoin"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           return buildJoin(JoinType::LEFT_OUTER, dynamics);
+         } < "AntiJoin"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           return buildJoin(JoinType::LEFT_ANTI, dynamics);
          } < "Name"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
          } < "ByName"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
@@ -221,7 +233,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
            auto aggregates = std::vector<compute::Aggregate>();
            auto keys = std::vector<FieldRef>();
            auto i = 1u;
-           for(; i < dynamics.size() && std::holds_alternative<ComplexExpression>(dynamics.at(i)); ++i) {
+           for(; i < dynamics.size() && std::holds_alternative<ComplexExpression>(dynamics.at(i));
+               ++i) {
              auto const& fn = get<ComplexExpression>(dynamics.at(i));
              auto const col = get<Symbol>(fn.getDynamicArguments().at(0));
              aggregates.push_back({fn.getHead().getName(),
@@ -233,13 +246,11 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!keys.empty())
              for(auto& agg : aggregates)
                agg.function = "hash_" + agg.function;
-           auto aggDecl = Declaration::Sequence(
-               {intermediates.at(dynamics.at(0)),
-                {"aggregate", AggregateNodeOptions(aggregates, keys)}});
+           auto aggDecl =
+               Declaration::Sequence({intermediates.at(dynamics.at(0)),
+                                      {"aggregate", AggregateNodeOptions(aggregates, keys)}});
            if(!keys.empty())
-             return intermediates.put(
-                 {"table_source",
-                  TableSourceNodeOptions(*DeclarationToTable(aggDecl, false))});
+             return intermediates.putTable(*DeclarationToTable(aggDecl, false));
            return intermediates.put(std::move(aggDecl));
          } < "Cumulate"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
@@ -250,13 +261,12 @@ static boss::Expression evaluate(boss::Expression&& e) {
                compute::CallFunction("cumulative_" + aggregationFunction.getHead().getName(),
                                      {input->GetColumnByName(aggregationAttribute.getName())})
                    ->chunked_array();
-           return intermediates.put(
-               {"table_source", TableSourceNodeOptions(*input->AddColumn(
-                                    input->num_columns(),
-                                    field(aggregationFunction.getHead().getName() + "(" +
-                                              aggregationAttribute.getName() + ")",
-                                          result->type()),
-                                    result))});
+           return intermediates.putTable(
+               *input->AddColumn(input->num_columns(),
+                                 field(aggregationFunction.getHead().getName() + "(" +
+                                           aggregationAttribute.getName() + ")",
+                                       result->type()),
+                                 result));
          } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
@@ -265,18 +275,14 @@ static boss::Expression evaluate(boss::Expression&& e) {
                (input->GetColumnByName(column)->num_chunks() == 1 ? input : *input->CombineChunks())
                    ->GetColumnByName(column);
            auto result = compute::CallFunction("pairwise_diff", {inputArray->chunk(0)}, &options);
-           return intermediates.put(
-               {"table_source", TableSourceNodeOptions(*input->AddColumn(
-                                    input->num_columns(),
-                                    field(get<Symbol>(dynamics.at(1)).getName(), result->type()),
-                                    *ChunkedArray::Make({result->make_array()})))});
+           return intermediates.putTable(*input->AddColumn(
+               input->num_columns(), field(get<Symbol>(dynamics.at(1)).getName(), result->type()),
+               *ChunkedArray::Make({result->make_array()})));
          } < "ToStatus"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return DeclarationToStatus(intermediates.at(dynamics.at(0)), false).CodeAsString();
          } < "Materialize"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return intermediates.put(
-               {"table_source",
-                TableSourceNodeOptions(
-                    *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks())});
+           return intermediates.putTable(
+               *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks());
          } < "Table"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto fields = std::vector<std::shared_ptr<arrow::Field>>();
            auto arrays = std::vector<std::shared_ptr<arrow::Array>>();
@@ -343,27 +349,25 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        *firstNonNull);
              }
            }
-           return intermediates.put({"table_source", TableSourceNodeOptions(arrow::Table::Make(
-                                                         arrow::schema(fields), arrays))});
+           return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));
          } < "Load"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return std::visit(
-               boss::utilities::overload(
-                   [](std::string&& path) -> boss::Expression {
-                     auto options = csv::ReadOptions::Defaults();
-                     options.use_threads = false;
-                     options.block_size = 1 << 26;
-                     auto maybeTable =
-                         (*csv::TableReader::Make(
-                              io::default_io_context(), *io::ReadableFile::Open(path), options,
-                              csv::ParseOptions::Defaults(), csv::ConvertOptions::Defaults()))
-                             ->Read();
-                     if(!maybeTable.ok())
-                       return maybeTable.status().ToStringWithoutContextLines();
-                     return intermediates.put(
-                         {"table_source", TableSourceNodeOptions(*(*maybeTable)->CombineChunks())});
-                   },
-                   [](auto&& e) -> boss::Expression { return e; }),
-               std::move(dynamics.at(0)));
+           return std::visit(boss::utilities::overload(
+                                 [](std::string&& path) -> boss::Expression {
+                                   auto options = csv::ReadOptions::Defaults();
+                                   options.use_threads = false;
+                                   options.block_size = 1 << 26;
+                                   auto maybeTable =
+                                       (*csv::TableReader::Make(
+                                            io::default_io_context(), *io::ReadableFile::Open(path),
+                                            options, csv::ParseOptions::Defaults(),
+                                            csv::ConvertOptions::Defaults()))
+                                           ->Read();
+                                   if(!maybeTable.ok())
+                                     return maybeTable.status().ToStringWithoutContextLines();
+                                   return intermediates.putTable(*(*maybeTable)->CombineChunks());
+                                 },
+                                 [](auto&& e) -> boss::Expression { return e; }),
+                             std::move(dynamics.at(0)));
          };
 };
 

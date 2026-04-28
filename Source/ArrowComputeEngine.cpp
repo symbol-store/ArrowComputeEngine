@@ -154,8 +154,18 @@ static boss::Expression evaluate(boss::Expression&& e) {
                 {"fetch", FetchNodeOptions(get<int>(dynamics.at(1)), get<int>(dynamics.at(2)))}}));
          } < "OrderBy"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto orderKeys = std::vector<compute::SortKey>();
-           for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
-             orderKeys.push_back(compute::SortKey(get<Symbol>(it).getName()));
+           for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments()) {
+             auto* sym = std::get_if<Symbol>(&it);
+             if(sym) {
+               orderKeys.push_back(compute::SortKey(sym->getName()));
+             } else {
+               auto const& ce = get<ComplexExpression>(it);
+               orderKeys.push_back(compute::SortKey(
+                   get<Symbol>(ce.getDynamicArguments().at(0)).getName(),
+                   ce.getHead().getName() == "desc" ? compute::SortOrder::Descending
+                                                    : compute::SortOrder::Ascending));
+             }
+           }
            return intermediates.put(
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"order_by", OrderByNodeOptions(Ordering(orderKeys))}}));

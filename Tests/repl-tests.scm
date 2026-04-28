@@ -68,6 +68,14 @@
         '(Table (A 1 1 2) (B 1 2 1))
         (boss-eval (OrderBy (Table (A 2 1 1) (B 1 2 1)) (keys A B))))
 
+  (test "OrderBy: descending"
+        '(Table (A 3 2 1))
+        (boss-eval (OrderBy (Table (A 1 3 2)) (keys (desc A)))))
+
+  (test "OrderBy: mixed asc/desc"
+        '(Table (A 1 1 2) (B 2 1 1))
+        (boss-eval (OrderBy (Table (A 2 1 1) (B 1 2 1)) (keys A (desc B)))))
+
   ;;; GroupBy
 
   (test "GroupBy: global sum"

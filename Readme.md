@@ -148,6 +148,12 @@ Internally, the engine uses a **pattern-matching dispatch table** (from BOSS's e
 
 ---
 
+## Coding Conventions
+
+- **No abbreviations in identifiers.** Write `functionName`, not `fnName`; `arguments`, not `args`; `columnName`, not `colName`. Full words make the code self-documenting and easier to search.
+
+---
+
 ## Project Structure
 
 ```

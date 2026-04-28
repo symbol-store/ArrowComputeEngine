@@ -48,18 +48,18 @@
         '(Table (A 1 2) (B 3 4))
         (boss-eval (Project (Table (A 1 2) (B 3 4) (C 5 6)) A B)))
 
-  (test "Project: column alias with (as expr name)"
+  (test "Project: column alias with (As expr name)"
         '(Table (revenue 90.0 180.0))
         (boss-eval
           (Project (Table (price 100 200) (discount 0.1 0.1))
-                   (as (multiply price (subtract 1.0 discount)) revenue))))
+                   (As (multiply price (subtract 1.0 discount)) revenue))))
 
   (test "Project: mix of plain columns and aliases"
         '(Table (price 100 200) (revenue 90.0 180.0))
         (boss-eval
           (Project (Table (price 100 200) (discount 0.1 0.1))
                    price
-                   (as (multiply price (subtract 1.0 discount)) revenue))))
+                   (As (multiply price (subtract 1.0 discount)) revenue))))
 
   ;;; Slice
 
@@ -83,57 +83,57 @@
 
   (test "OrderBy: descending"
         '(Table (A 3 2 1))
-        (boss-eval (OrderBy (Table (A 1 3 2)) (keys (desc A)))))
+        (boss-eval (OrderBy (Table (A 1 3 2)) (keys (Desc A)))))
 
   (test "OrderBy: mixed asc/desc"
         '(Table (A 1 1 2) (B 2 1 1))
-        (boss-eval (OrderBy (Table (A 2 1 1) (B 1 2 1)) (keys A (desc B)))))
+        (boss-eval (OrderBy (Table (A 2 1 1) (B 1 2 1)) (keys A (Desc B)))))
 
   ;;; GroupBy
 
   (test "GroupBy: global sum"
         '(Table (|sum(A)| 6))
-        (boss-eval (GroupBy (Table (A 1 2 3)) (sum A))))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (Sum A))))
 
   (test "GroupBy: global count"
         '(Table (|count(A)| 3))
-        (boss-eval (GroupBy (Table (A 1 2 3)) (count A))))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (Count A))))
 
   (test "GroupBy: global mean"
         '(Table (|mean(A)| 2.0))
-        (boss-eval (GroupBy (Table (A 1 2 3)) (mean A))))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (Mean A))))
 
   (test "GroupBy: two keys (Q1-style returnflag + linestatus)"
         '(Table (returnflag 1 1 2 2) (linestatus 1 2 1 2) (|sum(quantity)| 17 36 8 28))
         (boss-eval
           (OrderBy
             (GroupBy (Table (quantity 17 36 8 28) (returnflag 1 1 2 2) (linestatus 1 2 1 2))
-                     (sum quantity)
+                     (Sum quantity)
                      returnflag linestatus)
             (keys returnflag linestatus))))
 
   (test "GroupBy: multiple aggregates global"
         '(Table (|sum(A)| 6) (|mean(A)| 2.0))
-        (boss-eval (GroupBy (Table (A 1 2 3)) (sum A) (mean A))))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (Sum A) (Mean A))))
 
   (test "GroupBy: multiple aggregates with key"
         '(Table (grp 1 2) (|sum(val)| 3 7) (|count(val)| 2 2))
         (boss-eval
           (OrderBy
             (GroupBy (Table (grp 1 1 2 2) (val 1 2 3 4))
-                     (sum val) (count val)
+                     (Sum val) (Count val)
                      grp)
             (keys grp))))
 
   (test "GroupBy: count_all global"
         '(Table (|count_all()| 3))
-        (boss-eval (GroupBy (Table (A 1 2 3)) (count_all))))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (CountAll))))
 
   (test "GroupBy: count_all with key"
         '(Table (grp 1 2) (|count_all()| 2 2))
         (boss-eval
           (OrderBy
-            (GroupBy (Table (grp 1 1 2 2) (val 1 2 3 4)) (count_all) grp)
+            (GroupBy (Table (grp 1 1 2 2) (val 1 2 3 4)) (CountAll) grp)
             (keys grp))))
 
   ;;; Materialize
@@ -152,7 +152,7 @@
 
   (test "Cumulate: running sum appends column"
         '(Table (A 1 2 3) (|sum(A)| 1 3 6))
-        (boss-eval (Cumulate (Table (A 1 2 3)) (sum A))))
+        (boss-eval (Cumulate (Table (A 1 2 3)) (Sum A))))
 
   ;;; Pairwise
   ;; pairwise_diff: out[i] = in[i] - in[i-lag]; first lag elements are NULL
@@ -213,7 +213,7 @@
         (boss-eval
           (OrderBy
             (GroupBy (Table (quantity 17 36 8 28) (returnflag 1 1 2 2) (linestatus 1 2 1 2))
-                     (sum quantity)
+                     (Sum quantity)
                      returnflag linestatus)
             (keys returnflag linestatus))))
 
@@ -224,7 +224,7 @@
           (GroupBy
             (Filter (Table (quantity 17 36 8 28) (extendedprice 100 200 80 150))
                     (Less quantity 24))
-            (sum extendedprice))))
+            (Sum extendedprice))))
 
   ;; Q3-like: join orders with lineitems for a given customer, sum revenue
   ;; custkey=1 has orderkeys 1 and 2; matching lineitems give prices 100+200+150=450
@@ -237,7 +237,7 @@
               (keys orderkey)
               (Table (orderkey 1 1 2 3) (extendedprice 100 200 150 300))
               (keys orderkey))
-            (sum extendedprice))))
+            (Sum extendedprice))))
 
   ;; Q2-like: find the two cheapest parts using OrderBy + Slice
   (test "Q2-like: two cheapest parts"
@@ -253,7 +253,7 @@
         '(Table (sales 10 20 15 30 5) (|sum(sales)| 10 30 45 75 80) (smoothed NULL 20 15 30 5))
         (boss-eval
           (Pairwise
-            (Cumulate (Table (sales 10 20 15 30 5)) (sum sales))
+            (Cumulate (Table (sales 10 20 15 30 5)) (Sum sales))
             smoothed |sum(sales)| 1)))
 
   ;; Multi-query reuse: store orders once, run two different aggregations
@@ -261,7 +261,7 @@
         '(Table (|sum(quantity)| 15))
         (begin
           (boss-eval (Name (Table (orderkey 1 1 2) (quantity 5 10 5)) orders))
-          (boss-eval (GroupBy (Filter (ByName orders) (Equal orderkey 1)) (sum quantity)))))
+          (boss-eval (GroupBy (Filter (ByName orders) (Equal orderkey 1)) (Sum quantity)))))
 
   ;; Q1: sum + count_all grouped by two keys, ordered
   ;; rows: (q=5,rf=1,ls=1),(q=5,rf=1,ls=1),(q=20,rf=1,ls=2),(q=15,rf=2,ls=1)
@@ -272,7 +272,7 @@
           (OrderBy
             (GroupBy
               (Table (quantity 5 5 20 15) (returnflag 1 1 1 2) (linestatus 1 1 2 1))
-              (sum quantity) (count_all) returnflag linestatus)
+              (Sum quantity) (CountAll) returnflag linestatus)
             (keys returnflag linestatus))))
 
   ;; Q3: join orders + lineitems (distinct key names → no _l/_r suffix), group by orderkey, order by revenue desc
@@ -284,8 +284,8 @@
             (GroupBy
               (Join (Table (o_orderkey 1 2 3) (custkey 1 1 2)) (keys o_orderkey)
                     (Table (l_orderkey 1 1 2 3) (extendedprice 100 200 200 50)) (keys l_orderkey))
-              (sum extendedprice) o_orderkey)
-            (keys (desc |sum(extendedprice)|)))))
+              (Sum extendedprice) o_orderkey)
+            (keys (Desc |sum(extendedprice)|)))))
 
   ;; Q10: multi-key groupby ordered by sum desc
   ;; groups: (cust=1,name=1)→100, (cust=2,name=2)→50, (cust=3,name=3)→300
@@ -295,8 +295,8 @@
           (OrderBy
             (GroupBy
               (Table (custkey 1 1 2 3) (name 1 1 2 3) (amount 60 40 50 300))
-              (sum amount) custkey name)
-            (keys (desc |sum(amount)|)))))
+              (Sum amount) custkey name)
+            (keys (Desc |sum(amount)|)))))
 
   ;; Q13: LeftJoin then count orders per customer; customer 3 has no orders → count=0
   (test "Q13: LeftJoin + count(nullable) per customer"
@@ -307,7 +307,7 @@
               (LeftJoin
                 (Table (custkey 1 2 3)) (keys custkey)
                 (Table (custkey 1 1 2) (orderkey 10 20 30)) (keys custkey))
-              (count orderkey) custkey_l)
+              (Count orderkey) custkey_l)
             (keys custkey_l))))
 
   ;; Q16: AntiJoin to exclude disqualified suppliers, count_all by brand, order desc
@@ -320,8 +320,8 @@
               (AntiJoin
                 (Table (suppkey 1 2 3 3 4) (brand 1 1 1 2 2)) (keys suppkey)
                 (Table (suppkey 3)) (keys suppkey))
-              (count_all) brand)
-            (keys (desc |count_all()|)))))
+              (CountAll) brand)
+            (keys (Desc |count_all()|)))))
 
   ;; Q18: HAVING via Filter-after-GroupBy stored with Name; semi-join lineitems to qualifying orders
   ;; heavy orders: orderkey=1 (sum=15 > 10); join filters lineitems; sum quantity per customer
@@ -330,7 +330,7 @@
         (begin
           (boss-eval (Name
             (Filter
-              (GroupBy (Table (orderkey 1 1 2) (quantity 8 7 3)) (sum quantity) orderkey)
+              (GroupBy (Table (orderkey 1 1 2) (quantity 8 7 3)) (Sum quantity) orderkey)
               (Greater |sum(quantity)| 10))
             q18_heavy))
           (boss-eval
@@ -338,8 +338,8 @@
               (GroupBy
                 (Join (Table (orderkey 1 1 2) (custkey 1 1 2) (quantity 8 7 3)) (keys orderkey)
                       (ByName q18_heavy) (keys orderkey))
-                (sum quantity) custkey)
-              (keys (desc |sum(quantity)|))))))
+                (Sum quantity) custkey)
+              (keys (Desc |sum(quantity)|))))))
 
   ;; Q21: AntiJoin to remove problem suppliers, count_all per region, order desc
   ;; suppkey=2 excluded; region=1 has sk=1,3 left (2), region=2 has sk=4,5,6 left (3)
@@ -351,8 +351,8 @@
               (AntiJoin
                 (Table (suppkey 1 2 3 4 5 6) (region 1 1 1 2 2 2)) (keys suppkey)
                 (Table (suppkey 2)) (keys suppkey))
-              (count_all) region)
-            (keys (desc |count_all()|)))))
+              (CountAll) region)
+            (keys (Desc |count_all()|)))))
 
   ;; Q4: semi-join via Name/ByName — count orders that have a qualifying lineitem
   ;; orders (ok=1,p=1),(ok=2,p=2),(ok=3,p=2); qualifying: ok=1,ok=2
@@ -366,7 +366,7 @@
               (GroupBy
                 (Join (Table (orderkey 1 2 3) (priority 1 2 2)) (keys orderkey)
                       (ByName q4_qualifying) (keys orderkey))
-                (count_all) priority)
+                (CountAll) priority)
               (keys priority)))))
 
   ;; Q5: multi-key groupby + aliased aggregate column
@@ -378,8 +378,8 @@
             (Project
               (GroupBy
                 (Table (nation 1 1 2) (yr 2020 2021 2020) (extendedprice 100.0 200.0 150.0))
-                (sum extendedprice) nation yr)
-              nation yr (as |sum(extendedprice)| revenue))
+                (Sum extendedprice) nation yr)
+              nation yr (As |sum(extendedprice)| revenue))
             (keys nation yr))))
 
   ;; Q7: year extraction from unix timestamp in filter + project
@@ -390,8 +390,8 @@
           (Project
             (Filter
               (Table (l_shipdate 1592179200 1623715200))
-              (Equal (year (timestamp l_shipdate)) 2020))
-            (as (year (timestamp l_shipdate)) shipyear))))
+              (Equal (Year (Timestamp l_shipdate)) 2020))
+            (As (Year (Timestamp l_shipdate)) shipyear))))
 
   ;; Q8: if_else in project + column aliasing
   ;; type="A" rows contribute extendedprice to revenue, others contribute 0.0
@@ -401,7 +401,7 @@
           (OrderBy
             (Project
               (Table (nation 1 2) (extendedprice 100.0 50.0) (type "A" "B"))
-              nation (as (if_else (Equal type "A") extendedprice 0.0) revenue))
+              nation (As (IfElse (Equal type "A") extendedprice 0.0) revenue))
             (keys nation))))
 
   ;; Q9: extract year from unix timestamp, then groupby year
@@ -414,8 +414,8 @@
             (GroupBy
               (Project
                 (Table (shipdate 694224000 694224001 725846400) (profit 60.0 40.0 200.0))
-                (as (year (timestamp shipdate)) yr) profit)
-              (sum profit) yr)
+                (As (Year (Timestamp shipdate)) yr) profit)
+              (Sum profit) yr)
             (keys yr))))
 
   ;; Q11: HAVING via Filter-after-GroupBy + result stored with Name/ByName
@@ -425,7 +425,7 @@
         (begin
           (boss-eval (Name
             (Filter
-              (GroupBy (Table (partkey 1 1 2) (value 400.0 200.0 100.0)) (sum value) partkey)
+              (GroupBy (Table (partkey 1 1 2) (value 400.0 200.0 100.0)) (Sum value) partkey)
               (Greater |sum(value)| 400.0))
             q11_result))
           (boss-eval (ByName q11_result))))
@@ -439,8 +439,8 @@
             (Project
               (GroupBy
                 (Table (shipmode 1 1 1 2))
-                (count_all) shipmode)
-              shipmode (as |count_all()| high_count))
+                (CountAll) shipmode)
+              shipmode (As |count_all()| high_count))
             (keys shipmode))))
 
   ;; Q14: multiple aggregates with aliased output columns (no groupby keys)
@@ -451,9 +451,9 @@
           (Project
             (GroupBy
               (Table (extendedprice 100.0 200.0 200.0) (promo_price 0.0 200.0 0.0))
-              (sum extendedprice) (sum promo_price))
-            (as |sum(promo_price)| promo_revenue)
-            (as |sum(extendedprice)| total_revenue))))
+              (Sum extendedprice) (Sum promo_price))
+            (As |sum(promo_price)| promo_revenue)
+            (As |sum(extendedprice)| total_revenue))))
 
   ;; Q19: complex nested AND/OR filter
   ;; keep: (q<24 AND price>90) OR (q>25 AND price<200)
@@ -473,7 +473,7 @@
         (begin
           (boss-eval (Name
             (Filter
-              (GroupBy (Table (partkey 1 1 2) (qty 8 7 3)) (sum qty) partkey)
+              (GroupBy (Table (partkey 1 1 2) (qty 8 7 3)) (Sum qty) partkey)
               (Greater |sum(qty)| 5))
             q20_qualifying))
           (boss-eval
@@ -481,6 +481,25 @@
               (Join (Table (p_partkey 1 2) (name "part1" "part2")) (keys p_partkey)
                     (ByName q20_qualifying) (keys partkey))
               p_partkey))))
+
+  ;; Q22: LIKE predicate — match_like forwards SQL % and _ wildcards to Arrow
+  (test "Q22: LIKE prefix match"
+        '(Table (name "Alice" "Alfred"))
+        (boss-eval
+          (Filter (Table (name "Alice" "Bob" "Alfred" "Carol"))
+                  (Like name "Al%"))))
+
+  (test "Q22: LIKE suffix match"
+        '(Table (name "Bob" "Rob"))
+        (boss-eval
+          (Filter (Table (name "Alice" "Bob" "Rob" "Carol"))
+                  (Like name "%ob"))))
+
+  (test "Q22: LIKE contains match"
+        '(Table (name "Alice" "Malice"))
+        (boss-eval
+          (Filter (Table (name "Alice" "Bob" "Malice" "Carol"))
+                  (Like name "%lic%"))))
 
 )
 

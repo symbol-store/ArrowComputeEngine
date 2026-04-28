@@ -108,6 +108,13 @@ public:
   }
 } intermediates;
 
+static std::string toArrowName(std::string name) {
+  std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+  if(name == "countall") return "count_all";
+  if(name == "ifelse") return "if_else";
+  return name;
+}
+
 static compute::Expression toComputeExpression(boss::Expression const& e) {
   return std::visit(
       boss::utilities::overload([](Symbol const& s) { return compute::field_ref(s.getName()); },
@@ -123,13 +130,17 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
                                   auto args = std::vector<compute::Expression>();
                                   for(auto const& arg : ce.getDynamicArguments())
                                     args.push_back(toComputeExpression(arg));
-                                  auto name = ce.getHead().getName();
-                                  std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                                  auto name = toArrowName(ce.getHead().getName());
                                   if(name == "timestamp")
                                     return compute::call(
                                         "cast", args,
                                         compute::CastOptions::Unsafe(
                                             arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
+                                  if(name == "like")
+                                    return compute::call(
+                                        "match_like", {args[0]},
+                                        compute::MatchSubstringOptions{
+                                            std::get<std::string>(ce.getDynamicArguments().at(1))});
                                   return compute::call(name, args);
                                 },
                                 [](auto const&) -> compute::Expression {
@@ -182,7 +193,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                auto const& ce = get<ComplexExpression>(it);
                orderKeys.push_back(compute::SortKey(
                    get<Symbol>(ce.getDynamicArguments().at(0)).getName(),
-                   ce.getHead().getName() == "desc" ? compute::SortOrder::Descending
+                   ce.getHead().getName() == "Desc" ? compute::SortOrder::Descending
                                                     : compute::SortOrder::Ascending));
              }
            }
@@ -215,28 +226,28 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        [&](ComplexExpression&& s) {
                          auto headName = s.getHead().getName();
                          auto const& args = s.getDynamicArguments();
-                         if(headName == "as") {
+                         if(headName == "As") {
                            projections.push_back(toComputeExpression(args.at(0)));
                            names.push_back(get<Symbol>(args.at(1)).getName());
                          } else {
                            auto arguments = std::vector<compute::Expression>();
                            for(auto const& it : args)
                              arguments.push_back(toComputeExpression(it));
-                           // "int"/"timestamp" map to casts — Arrow compute doesn't expose these by name
+                           // "Int"/"Timestamp" map to casts — Arrow compute doesn't expose these by name
                            auto expr =
-                               headName == "int"
+                               headName == "Int"
                                    ? compute::call("cast", arguments,
                                                    compute::CastOptions::Unsafe(int32()))
-                               : headName == "timestamp"
+                               : headName == "Timestamp"
                                    ? compute::call(
                                          "cast", arguments,
                                          compute::CastOptions::Unsafe(
                                              arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")))
-                                   : compute::call(headName, arguments);
+                                   : compute::call(toArrowName(headName), arguments);
                            projections.push_back(expr);
-                           names.push_back(headName == "int"
+                           names.push_back(headName == "Int"
                                                ? "int(" + arguments.back().ToString() + ")"
-                                           : headName == "timestamp"
+                                           : headName == "Timestamp"
                                                ? "timestamp(" + arguments.back().ToString() + ")"
                                                : expr.ToString());
                          }
@@ -254,12 +265,12 @@ static boss::Expression evaluate(boss::Expression&& e) {
                ++i) {
              auto const& fn = get<ComplexExpression>(dynamics.at(i));
              auto const& args = fn.getDynamicArguments();
+             auto const functionName = toArrowName(fn.getHead().getName());
              if(args.empty()) {
-               aggregates.emplace_back(fn.getHead().getName(), fn.getHead().getName() + "()");
+               aggregates.emplace_back(functionName, functionName + "()");
              } else {
                auto const col = get<Symbol>(args.at(0));
-               aggregates.push_back({fn.getHead().getName(), col.getName(),
-                                     fn.getHead().getName() + "(" + col.getName() + ")"});
+               aggregates.push_back({functionName, col.getName(), functionName + "(" + col.getName() + ")"});
              }
            }
            for(; i < dynamics.size(); ++i)
@@ -277,15 +288,15 @@ static boss::Expression evaluate(boss::Expression&& e) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
            auto const aggregationAttribute =
                get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
+           auto const functionName = toArrowName(aggregationFunction.getHead().getName());
            auto input = (intermediates.getTable(intermediates.at(dynamics.at(0))));
            auto result =
-               compute::CallFunction("cumulative_" + aggregationFunction.getHead().getName(),
+               compute::CallFunction("cumulative_" + functionName,
                                      {input->GetColumnByName(aggregationAttribute.getName())})
                    ->chunked_array();
            return intermediates.putTable(
                *input->AddColumn(input->num_columns(),
-                                 field(aggregationFunction.getHead().getName() + "(" +
-                                           aggregationAttribute.getName() + ")",
+                                 field(functionName + "(" + aggregationAttribute.getName() + ")",
                                        result->type()),
                                  result));
          } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {

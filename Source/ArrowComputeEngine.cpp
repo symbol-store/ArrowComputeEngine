@@ -139,10 +139,8 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
 }
 
 template <typename T, typename F> static void withBuilder(F&& use) {
-  if constexpr(std::is_same_v<T, int64_t>)
+  if constexpr(std::is_same_v<T, int64_t> || std::is_same_v<T, int32_t>)
     use(arrow::Int64Builder {}, arrow::int64());
-  else if constexpr(std::is_same_v<T, int32_t>)
-    use(arrow::Int32Builder {}, arrow::int32());
   else if constexpr(std::is_same_v<T, double_t>)
     use(arrow::DoubleBuilder {}, arrow::float64());
   else if constexpr(std::is_same_v<T, float_t>)

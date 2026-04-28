@@ -125,6 +125,11 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
                                     args.push_back(toComputeExpression(arg));
                                   auto name = ce.getHead().getName();
                                   std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                                  if(name == "timestamp")
+                                    return compute::call(
+                                        "cast", args,
+                                        compute::CastOptions::Unsafe(
+                                            arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
                                   return compute::call(name, args);
                                 },
                                 [](auto const&) -> compute::Expression {
@@ -219,14 +224,22 @@ static boss::Expression evaluate(boss::Expression&& e) {
                            auto arguments = std::vector<compute::Expression>();
                            for(auto const& it : args)
                              arguments.push_back(toComputeExpression(it));
-                           // "int"_(x) maps to a cast — Arrow compute doesn't expose cast by name
-                           auto expr = headName == "int"
-                                           ? compute::call("cast", arguments,
-                                                           compute::CastOptions::Unsafe(int32()))
-                                           : compute::call(headName, arguments);
+                           // "int"/"timestamp" map to casts — Arrow compute doesn't expose these by name
+                           auto expr =
+                               headName == "int"
+                                   ? compute::call("cast", arguments,
+                                                   compute::CastOptions::Unsafe(int32()))
+                               : headName == "timestamp"
+                                   ? compute::call(
+                                         "cast", arguments,
+                                         compute::CastOptions::Unsafe(
+                                             arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")))
+                                   : compute::call(headName, arguments);
                            projections.push_back(expr);
                            names.push_back(headName == "int"
                                                ? "int(" + arguments.back().ToString() + ")"
+                                           : headName == "timestamp"
+                                               ? "timestamp(" + arguments.back().ToString() + ")"
                                                : expr.ToString());
                          }
                        },

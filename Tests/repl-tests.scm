@@ -354,6 +354,134 @@
               (count_all) region)
             (keys (desc |count_all()|)))))
 
+  ;; Q4: semi-join via Name/ByName — count orders that have a qualifying lineitem
+  ;; orders (ok=1,p=1),(ok=2,p=2),(ok=3,p=2); qualifying: ok=1,ok=2
+  ;; after join: ok=1(p=1), ok=2(p=2) → count_all by priority: p=1→1, p=2→1
+  (test "Q4: semi-join (Name/ByName) + count_all by priority"
+        '(Table (priority 1 2) (|count_all()| 1 1))
+        (begin
+          (boss-eval (Name (Table (orderkey 1 2)) q4_qualifying))
+          (boss-eval
+            (OrderBy
+              (GroupBy
+                (Join (Table (orderkey 1 2 3) (priority 1 2 2)) (keys orderkey)
+                      (ByName q4_qualifying) (keys orderkey))
+                (count_all) priority)
+              (keys priority)))))
+
+  ;; Q5: multi-key groupby + aliased aggregate column
+  ;; groups (nation=1,yr=2020)→100.0, (nation=1,yr=2021)→200.0, (nation=2,yr=2020)→150.0
+  (test "Q5: multi-key groupby + aliased aggregate"
+        '(Table (nation 1 1 2) (yr 2020 2021 2020) (revenue 100.0 200.0 150.0))
+        (boss-eval
+          (OrderBy
+            (Project
+              (GroupBy
+                (Table (nation 1 1 2) (yr 2020 2021 2020) (extendedprice 100.0 200.0 150.0))
+                (sum extendedprice) nation yr)
+              nation yr (as |sum(extendedprice)| revenue))
+            (keys nation yr))))
+
+  ;; Q7: year extraction from unix timestamp in filter + project
+  ;; 1592179200 = 2020-06-15 UTC; 1623715200 = 2021-06-15 UTC → keep only 2020 row
+  (test "Q7: year extraction from unix timestamp"
+        '(Table (shipyear 2020))
+        (boss-eval
+          (Project
+            (Filter
+              (Table (l_shipdate 1592179200 1623715200))
+              (Equal (year (timestamp l_shipdate)) 2020))
+            (as (year (timestamp l_shipdate)) shipyear))))
+
+  ;; Q8: if_else in project + column aliasing
+  ;; type="A" rows contribute extendedprice to revenue, others contribute 0.0
+  (test "Q8: if_else in project + column aliasing"
+        '(Table (nation 1 2) (revenue 100.0 0.0))
+        (boss-eval
+          (OrderBy
+            (Project
+              (Table (nation 1 2) (extendedprice 100.0 50.0) (type "A" "B"))
+              nation (as (if_else (Equal type "A") extendedprice 0.0) revenue))
+            (keys nation))))
+
+  ;; Q9: extract year from unix timestamp, then groupby year
+  ;; 694224000 = 1992-01-01 UTC; 694224001 = same year; 725846400 = 1993-01-01 UTC
+  ;; project year first → yr column; groupby yr; sum profit
+  (test "Q9: project year from timestamp + groupby + sum"
+        '(Table (yr 1992 1993) (|sum(profit)| 100.0 200.0))
+        (boss-eval
+          (OrderBy
+            (GroupBy
+              (Project
+                (Table (shipdate 694224000 694224001 725846400) (profit 60.0 40.0 200.0))
+                (as (year (timestamp shipdate)) yr) profit)
+              (sum profit) yr)
+            (keys yr))))
+
+  ;; Q11: HAVING via Filter-after-GroupBy + result stored with Name/ByName
+  ;; partkey=1: sum=600.0 > 400.0 → kept; partkey=2: sum=100.0 → filtered out
+  (test "Q11: groupby + HAVING filter + Name/ByName retrieval"
+        '(Table (partkey 1) (|sum(value)| 600.0))
+        (begin
+          (boss-eval (Name
+            (Filter
+              (GroupBy (Table (partkey 1 1 2) (value 400.0 200.0 100.0)) (sum value) partkey)
+              (Greater |sum(value)| 400.0))
+            q11_result))
+          (boss-eval (ByName q11_result))))
+
+  ;; Q12: groupby shipmode + aliased count column
+  ;; mode=1 has 3 rows, mode=2 has 1 row
+  (test "Q12: groupby shipmode + aliased count_all"
+        '(Table (shipmode 1 2) (high_count 3 1))
+        (boss-eval
+          (OrderBy
+            (Project
+              (GroupBy
+                (Table (shipmode 1 1 1 2))
+                (count_all) shipmode)
+              shipmode (as |count_all()| high_count))
+            (keys shipmode))))
+
+  ;; Q14: multiple aggregates with aliased output columns (no groupby keys)
+  ;; sum(extendedprice)=500.0, sum(promo_price)=200.0; aliased to total_revenue / promo_revenue
+  (test "Q14: multi-aggregate + aliased output columns"
+        '(Table (promo_revenue 200.0) (total_revenue 500.0))
+        (boss-eval
+          (Project
+            (GroupBy
+              (Table (extendedprice 100.0 200.0 200.0) (promo_price 0.0 200.0 0.0))
+              (sum extendedprice) (sum promo_price))
+            (as |sum(promo_price)| promo_revenue)
+            (as |sum(extendedprice)| total_revenue))))
+
+  ;; Q19: complex nested AND/OR filter
+  ;; keep: (q<24 AND price>90) OR (q>25 AND price<200)
+  ;; row1: q=17<24 AND price=100>90 → TRUE; row2: q=36, 200<200 FALSE; row3: 80>90 FALSE; row4: q=28>25 AND 150<200 → TRUE
+  (test "Q19: nested AND/OR filter predicate"
+        '(Table (quantity 17 28) (price 100.0 150.0))
+        (boss-eval
+          (Filter
+            (Table (quantity 17 36 8 28) (price 100.0 200.0 80.0 150.0))
+            (Or (And (Less quantity 24) (Greater price 90.0))
+                (And (Greater quantity 25) (Less price 200.0))))))
+
+  ;; Q20: non-correlated subquery via Name/ByName — join parts to qualifying supply subset
+  ;; partkey=1: sum(qty)=15 > 5 → qualifying; partkey=2: sum=3 → not qualifying
+  (test "Q20: Name/ByName non-correlated subquery"
+        '(Table (p_partkey 1))
+        (begin
+          (boss-eval (Name
+            (Filter
+              (GroupBy (Table (partkey 1 1 2) (qty 8 7 3)) (sum qty) partkey)
+              (Greater |sum(qty)| 5))
+            q20_qualifying))
+          (boss-eval
+            (Project
+              (Join (Table (p_partkey 1 2) (name "part1" "part2")) (keys p_partkey)
+                    (ByName q20_qualifying) (keys partkey))
+              p_partkey))))
+
 )
 
 (test-exit)

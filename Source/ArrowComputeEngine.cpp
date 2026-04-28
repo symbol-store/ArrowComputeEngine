@@ -208,20 +208,24 @@ static boss::Expression evaluate(boss::Expression&& e) {
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"project", ProjectNodeOptions(projections, names)}}));
          } < "GroupBy"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
-           auto const aggregation = get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
+           auto aggregates = std::vector<compute::Aggregate>();
            auto keys = std::vector<FieldRef>();
-           for(auto i = 2u; i < dynamics.size(); i++)
+           auto i = 1u;
+           for(; i < dynamics.size() && std::holds_alternative<ComplexExpression>(dynamics.at(i)); ++i) {
+             auto const& fn = get<ComplexExpression>(dynamics.at(i));
+             auto const col = get<Symbol>(fn.getDynamicArguments().at(0));
+             aggregates.push_back({fn.getHead().getName(),
+                                   {col.getName()},
+                                   fn.getHead().getName() + "(" + col.getName() + ")"});
+           }
+           for(; i < dynamics.size(); ++i)
              keys.push_back(get<Symbol>(dynamics.at(i)).getName());
+           if(!keys.empty())
+             for(auto& agg : aggregates)
+               agg.function = "hash_" + agg.function;
            auto aggDecl = Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
-                {"aggregate", AggregateNodeOptions(
-                                  {compute::Aggregate((!keys.empty() ? "hash_" : "") +
-                                                          aggregationFunction.getHead().getName(),
-                                                      {aggregation.getName()},
-                                                      aggregationFunction.getHead().getName() +
-                                                          "_" + aggregation.getName())},
-                                  keys)}});
+                {"aggregate", AggregateNodeOptions(aggregates, keys)}});
            if(!keys.empty())
              return intermediates.put(
                  {"table_source",
@@ -239,8 +243,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
            return intermediates.put(
                {"table_source", TableSourceNodeOptions(*input->AddColumn(
                                     input->num_columns(),
-                                    field(aggregationFunction.getHead().getName() + "_" +
-                                              aggregationAttribute.getName(),
+                                    field(aggregationFunction.getHead().getName() + "(" +
+                                              aggregationAttribute.getName() + ")",
                                           result->type()),
                                     result))});
          } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {

@@ -82,6 +82,15 @@
         '(Table (mean_A 2.0))
         (boss-eval (GroupBy (Table (A 1 2 3)) (mean A))))
 
+  (test "GroupBy: two keys (Q1-style returnflag + linestatus)"
+        '(Table (returnflag 1 1 2 2) (linestatus 1 2 1 2) (sum_quantity 17 36 8 28))
+        (boss-eval
+          (OrderBy
+            (GroupBy (Table (quantity 17 36 8 28) (returnflag 1 1 2 2) (linestatus 1 2 1 2))
+                     (sum quantity)
+                     returnflag linestatus)
+            (keys returnflag linestatus))))
+
   ;;; Materialize
 
   (test "Materialize: preserves data"
@@ -133,16 +142,15 @@
 
 (test-group "TPC-H inspired"
 
-  ;; Q1-like: aggregate quantity by return status, ordered for determinism
-  ;; returnflag 1 = Normal (17+36=53), returnflag 2 = Return (8+28=36)
-  (test "Q1-like: sum quantity by returnflag"
-        '(Table (returnflag 1 2) (sum_quantity 53 36))
+  ;; Q1-like: aggregate quantity by returnflag and linestatus, ordered for determinism
+  (test "Q1-like: sum quantity by returnflag and linestatus"
+        '(Table (returnflag 1 1 2 2) (linestatus 1 2 1 2) (sum_quantity 17 36 8 28))
         (boss-eval
           (OrderBy
-            (GroupBy (Table (quantity 17 36 8 28) (returnflag 1 1 2 2))
+            (GroupBy (Table (quantity 17 36 8 28) (returnflag 1 1 2 2) (linestatus 1 2 1 2))
                      (sum quantity)
-                     returnflag)
-            (keys returnflag))))
+                     returnflag linestatus)
+            (keys returnflag linestatus))))
 
   ;; Q6-like: sum revenue for items with quantity below threshold (17, 8 qualify)
   (test "Q6-like: filtered revenue sum"

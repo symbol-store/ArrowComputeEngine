@@ -210,17 +210,23 @@ static boss::Expression evaluate(boss::Expression&& e) {
          } < "GroupBy"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
            auto const aggregation = get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
-           return intermediates.put(Declaration::Sequence(
+           auto keys = std::vector<FieldRef>();
+           for(auto i = 2u; i < dynamics.size(); i++)
+             keys.push_back(get<Symbol>(dynamics.at(i)).getName());
+           auto aggDecl = Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
                 {"aggregate", AggregateNodeOptions(
-                                  {compute::Aggregate((dynamics.size() == 3 ? "hash_" : "") +
+                                  {compute::Aggregate((!keys.empty() ? "hash_" : "") +
                                                           aggregationFunction.getHead().getName(),
                                                       {aggregation.getName()},
                                                       aggregationFunction.getHead().getName() +
                                                           "_" + aggregation.getName())},
-                                  dynamics.size() == 3 ? std::vector<FieldRef> {(
-                                                             get<Symbol>(dynamics.at(2)).getName())}
-                                                       : std::vector<FieldRef>())}}));
+                                  keys)}});
+           if(!keys.empty())
+             return intermediates.put(
+                 {"table_source",
+                  TableSourceNodeOptions(*DeclarationToTable(aggDecl, false))});
+           return intermediates.put(std::move(aggDecl));
          } < "Cumulate"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
            auto const aggregationAttribute =

@@ -112,6 +112,17 @@
                      grp)
             (keys grp))))
 
+  (test "GroupBy: count_all global"
+        '(Table (|count_all()| 3))
+        (boss-eval (GroupBy (Table (A 1 2 3)) (count_all))))
+
+  (test "GroupBy: count_all with key"
+        '(Table (grp 1 2) (|count_all()| 2 2))
+        (boss-eval
+          (OrderBy
+            (GroupBy (Table (grp 1 1 2 2) (val 1 2 3 4)) (count_all) grp)
+            (keys grp))))
+
   ;;; Materialize
 
   (test "Materialize: preserves data"

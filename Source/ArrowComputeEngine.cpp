@@ -236,10 +236,15 @@ static boss::Expression evaluate(boss::Expression&& e) {
            for(; i < dynamics.size() && std::holds_alternative<ComplexExpression>(dynamics.at(i));
                ++i) {
              auto const& fn = get<ComplexExpression>(dynamics.at(i));
-             auto const col = get<Symbol>(fn.getDynamicArguments().at(0));
-             aggregates.push_back({fn.getHead().getName(),
-                                   {col.getName()},
-                                   fn.getHead().getName() + "(" + col.getName() + ")"});
+             auto const& args = fn.getDynamicArguments();
+             if(args.empty()) {
+               aggregates.emplace_back(fn.getHead().getName(), fn.getHead().getName() + "()");
+             } else {
+               auto const col = get<Symbol>(args.at(0));
+               aggregates.push_back({fn.getHead().getName(),
+                                     col.getName(),
+                                     fn.getHead().getName() + "(" + col.getName() + ")"});
+             }
            }
            for(; i < dynamics.size(); ++i)
              keys.push_back(get<Symbol>(dynamics.at(i)).getName());

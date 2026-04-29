@@ -40,7 +40,7 @@ public:
                                          boss::expressions::AtomicExpression>)
         columnValues.push_back(value.value);
       else if constexpr(std::is_same_v<std::remove_reference_t<T>, arrow::StringScalar const>)
-        columnValues.push_back(boss::Expression((char const*)value.data()));
+        columnValues.push_back(std::string(value.view()));
       else
         columnValues.push_back("ArrowType"_(value.ToString()));
     } else
@@ -110,9 +110,13 @@ public:
 
 static std::string toArrowName(std::string name) {
   std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-  if(name == "countall") return "count_all";
-  if(name == "ifelse") return "if_else";
-  return name;
+  static std::unordered_map<std::string, std::string> const aliases = {
+      {"countall", "count_all"}, {"ifelse", "if_else"},   {"lessequal", "less_equal"},
+      {"greaterequal", "greater_equal"}, {"notequal", "not_equal"}, {"not", "invert"},
+      {"avg", "mean"},
+  };
+  auto it = aliases.find(name);
+  return it != aliases.end() ? it->second : name;
 }
 
 static compute::Expression toComputeExpression(boss::Expression const& e) {
@@ -127,21 +131,35 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
                                   return compute::literal(std::make_shared<arrow::StringScalar>(s));
                                 },
                                 [](ComplexExpression const& ce) {
-                                  auto args = std::vector<compute::Expression>();
-                                  for(auto const& arg : ce.getDynamicArguments())
-                                    args.push_back(toComputeExpression(arg));
                                   auto name = toArrowName(ce.getHead().getName());
-                                  if(name == "timestamp")
+                                  auto operands = std::vector<compute::Expression>();
+                                  for(auto const& arg : ce.getDynamicArguments()) {
+                                    auto expr = toComputeExpression(arg);
+                                    auto* s = std::set<std::string_view>{"less", "less_equal",
+                                        "greater", "greater_equal", "equal", "not_equal"}.count(name)
+                                        ? std::get_if<std::string>(&arg) : nullptr;
+                                    operands.push_back(
+                                        s && s->size() == 10 && (*s)[4] == '-' && (*s)[7] == '-'
+                                            ? compute::call("cast", {std::move(expr)},
+                                                            compute::CastOptions::Unsafe(arrow::date32()))
+                                            : std::move(expr));
+                                  }
+                                  if(name == "date")
                                     return compute::call(
-                                        "cast", args,
+                                        "cast", operands,
+                                        compute::CastOptions::Unsafe(arrow::date32()));
+                                  else if(name == "timestamp")
+                                    return compute::call(
+                                        "cast", operands,
                                         compute::CastOptions::Unsafe(
                                             arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
-                                  if(name == "like")
+                                  else if(name == "like")
                                     return compute::call(
-                                        "match_like", {args[0]},
+                                        "match_like", {operands[0]},
                                         compute::MatchSubstringOptions{
                                             std::get<std::string>(ce.getDynamicArguments().at(1))});
-                                  return compute::call(name, args);
+                                  else
+                                    return compute::call(name, operands);
                                 },
                                 [](auto const&) -> compute::Expression {
                                   throw std::runtime_error("unsupported compute expression");
@@ -383,23 +401,35 @@ static boss::Expression evaluate(boss::Expression&& e) {
            }
            return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));
          } < "Load"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return std::visit(boss::utilities::overload(
-                                 [](std::string&& path) -> boss::Expression {
-                                   auto options = csv::ReadOptions::Defaults();
-                                   options.use_threads = false;
-                                   options.block_size = 1 << 26;
-                                   auto maybeTable =
-                                       (*csv::TableReader::Make(
-                                            io::default_io_context(), *io::ReadableFile::Open(path),
-                                            options, csv::ParseOptions::Defaults(),
-                                            csv::ConvertOptions::Defaults()))
-                                           ->Read();
-                                   if(!maybeTable.ok())
-                                     return maybeTable.status().ToStringWithoutContextLines();
-                                   return intermediates.putTable(*(*maybeTable)->CombineChunks());
-                                 },
-                                 [](auto&& e) -> boss::Expression { return e; }),
-                             std::move(dynamics.at(0)));
+           return std::visit(
+               boss::utilities::overload(
+                   [&dynamics](std::string&& path) -> boss::Expression {
+                     std::vector<std::string> columnNames;
+                     for(auto i = 1u; i < dynamics.size(); ++i)
+                       columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
+                     auto readOptions    = csv::ReadOptions::Defaults();
+                     auto parseOptions   = csv::ParseOptions::Defaults();
+                     auto convertOptions = csv::ConvertOptions::Defaults();
+                     readOptions.use_threads = false;
+                     readOptions.block_size  = 1 << 26;
+                     bool isTbl = path.size() > 4 && path.substr(path.size() - 4) == ".tbl";
+                     if(isTbl) parseOptions.delimiter = '|';
+                     if(!columnNames.empty()) {
+                       auto withTrailing = columnNames;
+                       if(isTbl) withTrailing.push_back("_trailing");
+                       readOptions.column_names       = withTrailing;
+                       convertOptions.include_columns = columnNames;
+                     }
+                     auto maybeTable =
+                         (*csv::TableReader::Make(io::default_io_context(),
+                                                  *io::ReadableFile::Open(path), readOptions,
+                                                  parseOptions, convertOptions))
+                             ->Read();
+                     if(!maybeTable.ok()) return maybeTable.status().ToStringWithoutContextLines();
+                     return intermediates.putTable(*(*maybeTable)->CombineChunks());
+                   },
+                   [](auto&& e) -> boss::Expression { return e; }),
+               std::move(dynamics.at(0)));
          };
 };
 

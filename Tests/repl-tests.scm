@@ -1,8 +1,13 @@
 (import (scheme base)
+        (scheme load)
+        (chibi time)
         (chibi test)
         (BOSS))
 
 (boss-eval (SetDefaultEnginePipeline "Build/libArrowComputeEngine.so"))
+
+;;; Load shared TPC-H query plans
+(load "Tests/tpch-queries.scm")
 
 (test-group "Arrow Compute Operators"
 
@@ -503,4 +508,219 @@
 
 )
 
-(test-exit)
+;;; ==========================================================================
+;;; TPC-H full queries — inline Table data, integer unix timestamps throughout
+;;; (avoids utf8 vs date32 mismatch from the auto-cast of ISO date literals)
+;;; Query plans are shared with tpch-bench.scm via Tests/tpch-queries.scm.
+;;; ==========================================================================
+(test-group "TPC-H: full queries"
+
+  (test "Q1: pricing summary by returnflag/linestatus"
+        '(Table (l_returnflag "A" "N") (l_linestatus "F" "O")
+                (sum_qty 20 10) (sum_base_price 200.0 100.0)
+                (sum_disc_price 190.0 95.0) (sum_charge 237.5 118.75)
+                (avg_qty 10.0 10.0) (avg_price 100.0 100.0) (avg_disc 0.05 0.05)
+                (count_order 2 1))
+        (tpch-q1
+          (Table (l_returnflag "A"       "A"       "N"       "N")
+                 (l_linestatus "F"       "F"       "O"       "O")
+                 (l_quantity    10        10        10         5)
+                 (l_extendedprice 100.0  100.0     100.0     50.0)
+                 (l_discount    0.05     0.05      0.05      0.05)
+                 (l_tax         0.25     0.25      0.25      0.25)
+                 (l_shipdate  904000000 904000000 904000000 905385600))
+          904608000))
+
+  (test "Q2: minimum cost supplier in EUROPE"
+        '(Table (s_acctbal 100.0) (s_name "Supp1") (n_name "GERMANY") (p_partkey 5)
+                (p_mfgr "M1") (s_address "A1") (s_phone "111") (s_comment ""))
+        (tpch-q2
+          (Table (s_suppkey 1 2) (s_name "Supp1" "Supp2") (s_address "A1" "A2")
+                 (s_nationkey 1 1) (s_phone "111" "222") (s_acctbal 100.0 50.0)
+                 (s_comment "" ""))
+          (Table (n_nationkey 1) (n_name "GERMANY") (n_regionkey 1) (n_comment ""))
+          (Table (r_regionkey 1) (r_name "EUROPE") (r_comment ""))
+          (Table (ps_partkey 5 5) (ps_suppkey 1 2)
+                 (ps_availqty 100 100) (ps_supplycost 90.0 120.0) (ps_comment "" ""))
+          (Table (p_partkey 5) (p_name "Steel") (p_mfgr "M1")
+                 (p_brand "B1") (p_type "15-BRASS") (p_size 15)
+                 (p_container "SM") (p_retailprice 200.0) (p_comment ""))))
+
+  (test "Q3: shipping priority revenue"
+        '(Table (l_orderkey 1 2) (o_orderdate 793000000 794000000)
+                (o_shippriority 0 1) (revenue 250.0 200.0))
+        (tpch-q3
+          (Table (c_custkey 1 2) (c_mktsegment "BUILDING" "AUTO"))
+          (Table (o_orderkey 1 2 3) (o_custkey 1 1 1)
+                 (o_orderdate 793000000 794000000 800000000)
+                 (o_shippriority 0 1 0))
+          (Table (l_orderkey 1 1 2 3) (l_extendedprice 200.0 50.0 200.0 999.0)
+                 (l_discount 0.0 0.0 0.0 0.0)
+                 (l_shipdate 796608000 796608000 796608000 796608000))
+          795225600))
+
+  (test "Q4: order priority count"
+        '(Table (o_orderpriority "1-URGENT" "2-HIGH") (|count_all()| 1 1))
+        (tpch-q4
+          (Table (l_orderkey 1 2 3) (l_commitdate 741484800 741484800 749000000)
+                 (l_receiptdate 744163200 744163200 741484800))
+          (Table (o_orderkey 1 2 3 4) (o_orderpriority "1-URGENT" "2-HIGH" "1-URGENT" "3-MEDIUM")
+                 (o_orderdate 745000000 745000000 745000000 700000000))
+          741484800 749433600))
+
+  (test "Q5: local supplier volume in ASIA"
+        '(Table (n_name "CHINA") (revenue 300.0))
+        (tpch-q5
+          (Table (s_suppkey 1) (s_nationkey 5))
+          (Table (n_nationkey 5) (n_name "CHINA") (n_regionkey 1))
+          (Table (r_regionkey 1) (r_name "ASIA"))
+          (Table (c_custkey 1) (c_nationkey 5))
+          (Table (o_orderkey 1) (o_custkey 1) (o_orderdate 770428800))
+          (Table (l_orderkey 1) (l_suppkey 1) (l_extendedprice 300.0))
+          757382400 788918400))
+
+  (test "Q6: forecasting revenue sum"
+        '(Table (|sum(revenue)| 12.0))
+        (tpch-q6
+          (Table (l_shipdate 770428800 770428800 700000000 770428800)
+                 (l_discount    0.06       0.06      0.06      0.06)
+                 (l_quantity    20.0       25.0      10.0      10.0)
+                 (l_extendedprice 100.0   100.0     100.0     100.0))
+          757382400 788918400))
+
+  (test "Q7: volume shipping between FRANCE and GERMANY"
+        '(Table (supp_nation "FRANCE" "GERMANY") (cust_nation "GERMANY" "FRANCE")
+                (l_year 1996 1995) (|sum(volume)| 180.0 100.0))
+        (tpch-q7
+          (Table (n_nationkey 1 2) (n_name "FRANCE" "GERMANY") (n_regionkey 1 1))
+          (Table (s_suppkey 1 2) (s_nationkey 1 2))
+          (Table (o_orderkey 1 2) (o_custkey 1 2))
+          (Table (c_custkey 1 2) (c_nationkey 2 1))
+          (Table (l_orderkey 1 2) (l_suppkey 1 2)
+                 (l_shipdate 820454400 788918400)
+                 (l_extendedprice 200.0 100.0) (l_discount 0.1 0.0))
+          788918400 851990400))
+
+  (test "Q8: national market share for BRAZIL"
+        '(Table (o_year 1995) (|sum(brazil_volume)| 200.0) (|sum(volume)| 200.0))
+        (tpch-q8
+          (Table (n_nationkey 1 2) (n_name "BRAZIL" "USA") (n_regionkey 1 1))
+          (Table (r_regionkey 1) (r_name "AMERICA"))
+          (Table (c_custkey 1) (c_nationkey 2))
+          (Table (s_suppkey 1) (s_nationkey 1))
+          (Table (p_partkey 1) (p_type "ECONOMY ANODIZED STEEL"))
+          (Table (o_orderkey 1) (o_custkey 1) (o_orderdate 800000000))
+          (Table (l_orderkey 1) (l_partkey 1) (l_suppkey 1)
+                 (l_extendedprice 200.0) (l_discount 0.0))
+          788918400 851990400))
+
+  (test "Q9: profit per nation and year for green parts"
+        '(Table (nation_name "CHINA" "GERMANY") (o_year 1992 1993) (|sum(profit)| 40.0 150.0))
+        (tpch-q9
+          (Table (n_nationkey 1 2) (n_name "CHINA" "GERMANY"))
+          (Table (s_suppkey 1 2) (s_nationkey 1 2))
+          (Table (p_partkey 1 2) (p_name "dark green" "red"))
+          (Table (l_orderkey 1 2) (l_partkey 1 1) (l_suppkey 1 2)
+                 (l_quantity 10 5) (l_extendedprice 100.0 200.0) (l_discount 0.1 0.0))
+          (Table (ps_partkey 1 1) (ps_suppkey 1 2) (ps_supplycost 5.0 10.0))
+          (Table (o_orderkey 1 2) (o_orderdate 694224000 725846400))))
+
+  (test "Q10: returned item revenue per customer"
+        '(Table (c_custkey 1) (c_name "Cust1") (c_acctbal 100.0) (c_phone "111")
+                (n_name "FRANCE") (revenue 200.0))
+        (tpch-q10
+          (Table (o_orderkey 1) (o_custkey 1) (o_orderdate 750000000))
+          (Table (c_custkey 1) (c_name "Cust1") (c_address "A1")
+                 (c_nationkey 1) (c_phone "111") (c_acctbal 100.0)
+                 (c_mktsegment "B") (c_comment ""))
+          (Table (l_orderkey 1 1) (l_extendedprice 200.0 100.0) (l_returnflag "R" "N"))
+          (Table (n_nationkey 1) (n_name "FRANCE"))
+          749433600 757382400))
+
+  (test "Q11: important stock parts in GERMANY"
+        '(Table (ps_partkey 1) (|sum(value)| 1600000.0))
+        (tpch-q11
+          (Table (ps_partkey 1 2) (ps_suppkey 1 1)
+                 (ps_availqty 1000 10) (ps_supplycost 1600.0 1.0))
+          (Table (s_suppkey 1) (s_nationkey 1))
+          (Table (n_nationkey 1) (n_name "GERMANY"))
+          1000000.0))
+
+  (test "Q12: per-shipmode high/low priority counts"
+        '(Table (l_shipmode "MAIL" "SHIP") (|sum(high_flag)| 1 0) (|sum(low_flag)| 0 1))
+        (tpch-q12
+          (Table (o_orderkey 1 2) (o_orderpriority "1-URGENT" "3-MEDIUM"))
+          (Table (l_orderkey 1 2) (l_shipmode "MAIL" "SHIP")
+                 (l_shipdate   757000000 757000000)
+                 (l_commitdate 757100000 757100000)
+                 (l_receiptdate 757382400 757382400))
+          757382400 788918400))
+
+  (test "Q13: customer order-count distribution"
+        '(Table (c_count 0 2) (|count_all()| 2 1))
+        (tpch-q13
+          (Table (c_custkey 1 2 3))
+          (Table (o_orderkey 1 2 3) (o_custkey 1 1 2)
+                 (o_comment "normal" "normal" "special special requests"))))
+
+  (test "Q14: promotion effect revenue split"
+        '(Table (promo_revenue 200.0) (total_revenue 450.0))
+        (tpch-q14
+          (Table (l_partkey 1 2 1) (l_shipdate 810000000 810000000 700000000)
+                 (l_extendedprice 200.0 250.0 500.0) (l_discount 0.0 0.0 0.0))
+          (Table (p_partkey 1 2) (p_type "PROMO ANODIZED" "STANDARD BOX"))
+          809913600 812505600))
+
+  (test "Q16: part/supplier combinations excluding complaint suppliers"
+        '(Table (p_brand "Brand#12") (p_type "SMALL STEEL") (p_size 3) (|count_all()| 1))
+        (tpch-q16
+          (Table (p_partkey 1 2 3) (p_brand "Brand#12" "Brand#45" "Brand#12")
+                 (p_type "SMALL STEEL" "SMALL STEEL" "MEDIUM POLISHED X")
+                 (p_size 3 3 3))
+          (Table (ps_partkey 1 1) (ps_suppkey 1 2))
+          (Table (s_suppkey 1 2)
+                 (s_comment "nice supplier" "Customer Complaints are common"))))
+
+  (test "Q18: large volume customer"
+        '(Table (c_name "Cust1") (c_custkey 1) (o_orderkey 1) (o_orderdate 794000000)
+                (o_totalprice 50000.0) (|sum(l_quantity)| 310))
+        (tpch-q18
+          (Table (l_orderkey 1 1 1 2) (l_quantity 100 100 110 100))
+          (Table (c_custkey 1) (c_name "Cust1"))
+          (Table (o_orderkey 1 2) (o_custkey 1 1)
+                 (o_orderdate 794000000 794000000) (o_totalprice 50000.0 10000.0))))
+
+  (test "Q19: discounted revenue across three brand tiers"
+        '(Table (|sum(revenue)| 565.0))
+        (tpch-q19
+          (Table (l_partkey 1 2 3 1) (l_quantity 5.0 15.0 25.0 5.0)
+                 (l_extendedprice 100.0 200.0 300.0 99.0) (l_discount 0.05 0.0 0.1 0.0)
+                 (l_shipinstruct "DELIVER IN PERSON" "DELIVER IN PERSON"
+                                 "DELIVER IN PERSON" "COLLECT COD")
+                 (l_shipmode "AIR" "AIR REG" "AIR" "AIR"))
+          (Table (p_partkey 1 2 3) (p_brand "Brand#12" "Brand#23" "Brand#34")
+                 (p_container "SM CASE" "MED BOX" "LG CASE") (p_size 3 5 10))))
+
+  (test "Q20: qualifying Canadian suppliers for forest parts"
+        '(Table (s_name "Supp4") (s_address "SAddr4"))
+        (tpch-q20
+          (Table (p_partkey 1 2) (p_name "forestA" "ironB"))
+          (Table (l_partkey 1 1) (l_suppkey 4 4) (l_quantity 5 5)
+                 (l_shipdate 770428800 770428800))
+          (Table (ps_partkey 1 1) (ps_suppkey 4 5) (ps_availqty 6 3) (ps_supplycost 1.0 1.0))
+          (Table (n_nationkey 3 4) (n_name "CANADA" "OTHER"))
+          (Table (s_suppkey 4 5) (s_name "Supp4" "Supp5")
+                 (s_address "SAddr4" "SAddr5") (s_nationkey 3 4))
+          757382400 788918400))
+
+  (test "Q21: suppliers who kept orders waiting in SAUDI ARABIA"
+        '(Table (s_name "Supp1") (|count_all()| 1))
+        (tpch-q21
+          (Table (l_orderkey 1 2 2) (l_suppkey 1 1 2)
+                 (l_commitdate 741484800 741484800 741484800)
+                 (l_receiptdate 744163200 744163200 744163200))
+          (Table (o_orderkey 1 2) (o_orderstatus "F" "F"))
+          (Table (s_suppkey 1 2 3) (s_name "Supp1" "Supp2" "Supp3") (s_nationkey 1 1 2))
+          (Table (n_nationkey 1 2) (n_name "SAUDI ARABIA" "OTHER"))))
+
+)

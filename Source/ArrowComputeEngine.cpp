@@ -50,7 +50,7 @@ public:
   boss::ExpressionArguments getColumnValues() && { return std::move(columnValues); };
 };
 
-static class {
+static struct {
   std::unordered_map<size_t, Declaration> intermediates;
   std::unordered_map<boss::Symbol, size_t> names;
 
@@ -59,7 +59,6 @@ static class {
     return std::uniform_int_distribution<int64_t>(LONG_LONG_MIN, LONG_LONG_MAX)(generator);
   };
 
-public:
   boss::Expression name(boss::Expression&& key, boss::Symbol name) {
     names[name] = std::get<int64_t>(key);
     return std::move(key);
@@ -100,12 +99,6 @@ public:
                : (*DeclarationToTable(d, false));
   };
 
-  void collectGarbage() {
-    auto live = std::set<size_t>();
-    for(auto& [name, key] : names)
-      live.insert(key);
-    std::erase_if(intermediates, [&](auto& kv) { return !live.count(kv.first); });
-  }
 } intermediates;
 
 static std::string toArrowName(std::string name) {
@@ -122,11 +115,6 @@ static std::string toArrowName(std::string name) {
 static compute::Expression toComputeExpression(boss::Expression const& e) {
   return std::visit(
       boss::utilities::overload([](Symbol const& s) { return compute::field_ref(s.getName()); },
-                                [](bool v) { return compute::literal(v); },
-                                [](int64_t v) { return compute::literal(v); },
-                                [](int32_t v) { return compute::literal(v); },
-                                [](double_t v) { return compute::literal(v); },
-                                [](float_t v) { return compute::literal(v); },
                                 [](std::string const& s) {
                                   return compute::literal(std::make_shared<arrow::StringScalar>(s));
                                 },
@@ -161,9 +149,7 @@ static compute::Expression toComputeExpression(boss::Expression const& e) {
                                   else
                                     return compute::call(name, operands);
                                 },
-                                [](auto const&) -> compute::Expression {
-                                  throw std::runtime_error("unsupported compute expression");
-                                }),
+                                [](auto v) { return compute::literal(v); }),
       e);
 }
 
@@ -355,7 +341,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                      [&](auto& typedSource) {
                        using Scalar = std::remove_const_t<
                            typename std::decay_t<decltype(typedSource)>::element_type>;
-                       auto append = [&](auto&& builder, auto type) {
+                       withBuilder<Scalar>([&](auto&& builder, auto type) {
                          for(auto& spanArg : spanArguments)
                            std::visit(
                                [&](auto& source) {
@@ -371,8 +357,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                spanArg);
                          arrays.push_back(*builder.Finish());
                          fields.push_back(arrow::field(columnName, type));
-                       };
-                       withBuilder<Scalar>(append);
+                       });
                      },
                      *firstTyped);
              } else {
@@ -384,7 +369,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                  visit(boss::utilities::overload(
                            [&]<typename T>(T const&)
                                requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
-                                 auto append = [&](auto&& builder, auto type) {
+                                 withBuilder<T>([&](auto&& builder, auto type) {
                                    for(auto& argument : dynamicArguments)
                                      if(std::holds_alternative<Symbol>(argument))
                                        (void)builder.AppendNull();
@@ -392,8 +377,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                        (void)builder.Append(get<T>(argument));
                                    arrays.push_back(*builder.Finish());
                                    fields.push_back(arrow::field(columnName, type));
-                                 };
-                                 withBuilder<T>(append);
+                                 });
                                },
                            [](auto&&) {}),
                        *firstNonNull);
@@ -436,6 +420,9 @@ static boss::Expression evaluate(boss::Expression&& e) {
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
   auto result = new BOSSExpression {
       .delegate = intermediates.convertResult(evaluate(std::move(e->delegate)))};
-  intermediates.collectGarbage();
+  auto live = std::set<size_t>();
+  for(auto& [name, key] : intermediates.names)
+    live.insert(key);
+  std::erase_if(intermediates.intermediates, [&](auto& kv) { return !live.count(kv.first); });
   return result;
 };

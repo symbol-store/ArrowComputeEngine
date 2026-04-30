@@ -42,7 +42,7 @@ ExternalProject_Add(BOSS
 
 
 ExternalProject_Add(Arrow
-  URL https://github.com/apache/arrow/archive/refs/tags/apache-arrow-23.0.0.tar.gz
+  URL https://github.com/apache/arrow/archive/refs/tags/apache-arrow-24.0.0.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP NEW
   DOWNLOAD_DIR $ENV{HOME}/.cmake-downloads/${CMAKE_PROJECT_NAME}
   SOURCE_SUBDIR cpp

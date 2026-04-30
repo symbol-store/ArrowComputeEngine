@@ -547,8 +547,8 @@
                  (p_container "SM") (p_retailprice 200.0) (p_comment ""))))
 
   (test "Q3: shipping priority revenue"
-        '(Table (l_orderkey 1 2) (o_orderdate 793000000 794000000)
-                (o_shippriority 0 1) (revenue 250.0 200.0))
+        '(Table (l_orderkey 1 2) (revenue 250.0 200.0)
+                (o_orderdate 793000000 794000000) (o_shippriority 0 1))
         (tpch-q3
           (Table (c_custkey 1 2) (c_mktsegment "BUILDING" "AUTO"))
           (Table (o_orderkey 1 2 3) (o_custkey 1 1 1)
@@ -576,7 +576,7 @@
           (Table (r_regionkey 1) (r_name "ASIA"))
           (Table (c_custkey 1) (c_nationkey 5))
           (Table (o_orderkey 1) (o_custkey 1) (o_orderdate 770428800))
-          (Table (l_orderkey 1) (l_suppkey 1) (l_extendedprice 300.0))
+          (Table (l_orderkey 1) (l_suppkey 1) (l_extendedprice 300.0) (l_discount 0.0))
           757382400 788918400))
 
   (test "Q6: forecasting revenue sum"
@@ -602,7 +602,7 @@
           788918400 851990400))
 
   (test "Q8: national market share for BRAZIL"
-        '(Table (o_year 1995) (|sum(brazil_volume)| 200.0) (|sum(volume)| 200.0))
+        '(Table (o_year 1995) (mkt_share 1.0))
         (tpch-q8
           (Table (n_nationkey 1 2) (n_name "BRAZIL" "USA") (n_regionkey 1 1))
           (Table (r_regionkey 1) (r_name "AMERICA"))
@@ -626,14 +626,15 @@
           (Table (o_orderkey 1 2) (o_orderdate 694224000 725846400))))
 
   (test "Q10: returned item revenue per customer"
-        '(Table (c_custkey 1) (c_name "Cust1") (c_acctbal 100.0) (c_phone "111")
-                (n_name "FRANCE") (revenue 200.0))
+        '(Table (c_custkey 1) (c_name "Cust1") (revenue 200.0)
+                (c_acctbal 100.0) (n_name "FRANCE") (c_address "A1")
+                (c_phone "111") (c_comment ""))
         (tpch-q10
           (Table (o_orderkey 1) (o_custkey 1) (o_orderdate 750000000))
           (Table (c_custkey 1) (c_name "Cust1") (c_address "A1")
                  (c_nationkey 1) (c_phone "111") (c_acctbal 100.0)
                  (c_mktsegment "B") (c_comment ""))
-          (Table (l_orderkey 1 1) (l_extendedprice 200.0 100.0) (l_returnflag "R" "N"))
+          (Table (l_orderkey 1 1) (l_extendedprice 200.0 100.0) (l_discount 0.0 0.0) (l_returnflag "R" "N"))
           (Table (n_nationkey 1) (n_name "FRANCE"))
           749433600 757382400))
 
@@ -663,11 +664,11 @@
           (Table (o_orderkey 1 2 3) (o_custkey 1 1 2)
                  (o_comment "normal" "normal" "special special requests"))))
 
-  (test "Q14: promotion effect revenue split"
-        '(Table (promo_revenue 200.0) (total_revenue 450.0))
+  (test "Q14: promotion effect percentage"
+        '(Table (promo_revenue 50.0))
         (tpch-q14
           (Table (l_partkey 1 2 1) (l_shipdate 810000000 810000000 700000000)
-                 (l_extendedprice 200.0 250.0 500.0) (l_discount 0.0 0.0 0.0))
+                 (l_extendedprice 200.0 200.0 500.0) (l_discount 0.0 0.0 0.0))
           (Table (p_partkey 1 2) (p_type "PROMO ANODIZED" "STANDARD BOX"))
           809913600 812505600))
 
@@ -716,9 +717,11 @@
   (test "Q21: suppliers who kept orders waiting in SAUDI ARABIA"
         '(Table (s_name "Supp1") (|count_all()| 1))
         (tpch-q21
-          (Table (l_orderkey 1 2 2) (l_suppkey 1 1 2)
-                 (l_commitdate 741484800 741484800 741484800)
-                 (l_receiptdate 744163200 744163200 744163200))
+          ;; Order 1: suppkey=1 (late) + suppkey=3 OTHER (on-time) → Supp1 qualifies
+          ;; Order 2: suppkey=1+2 both late → multi-late-supplier → AntiJoin removes both
+          (Table (l_orderkey 1 1 2 2) (l_suppkey 1 3 1 2)
+                 (l_commitdate  741484800 741484800 741484800 741484800)
+                 (l_receiptdate 744163200 741484800 744163200 744163200))
           (Table (o_orderkey 1 2) (o_orderstatus "F" "F"))
           (Table (s_suppkey 1 2 3) (s_name "Supp1" "Supp2" "Supp3") (s_nationkey 1 1 2))
           (Table (n_nationkey 1 2) (n_name "SAUDI ARABIA" "OTHER"))))

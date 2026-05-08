@@ -1,10 +1,17 @@
-(import (scheme base)
-        (scheme load)
+(import (scheme load)
         (chibi time)
-        (chibi test)
-        (BOSS))
+        (chibi test))
 
 (boss-eval (SetDefaultEnginePipeline "Build/libArrowComputeEngine.so"))
+
+;;; boss-run must be defined here (not in tpch-queries.scm) because macro
+;;; expansions look up boss-run in the call-site environment.  Chibi's
+;;; (import ...) creates a scope local to the loaded file, so definitions
+;;; inside tpch-queries.scm after its own import are invisible here.
+(define (boss-run expr)
+  (let ((b (convert-to-boss-expression expr)))
+    (boss-expression-transfer! b)
+    (convert-from-boss-expression (BOSSEvaluate b))))
 
 (load "Tests/tpch-queries.scm")
 
@@ -41,7 +48,7 @@
 
   (test-assert "Q1"
     (check-expected
-      (tpch-q1 (ByName lineitem) ,(date->days "1998-09-02"))
+      (tpch-q1 (ByName lineitem) (date->days "1998-09-02"))
       tpch-q1-expected))
 
   (test-assert "Q2"
@@ -53,40 +60,40 @@
   (test-assert "Q3"
     (check-expected
       (tpch-q3 (ByName customer) (ByName orders) (ByName lineitem)
-               ,(date->days "1995-03-15"))
+               (date->days "1995-03-15"))
       tpch-q3-expected))
 
   (test-assert "Q4"
     (check-expected
       (tpch-q4 (ByName lineitem) (ByName orders)
-               ,(date->days "1993-07-01") ,(date->days "1993-10-01"))
+               (date->days "1993-07-01") (date->days "1993-10-01"))
       tpch-q4-expected))
 
   (test-assert "Q5"
     (check-expected
       (tpch-q5 (ByName supplier) (ByName nation) (ByName region)
                (ByName customer) (ByName orders) (ByName lineitem)
-               ,(date->days "1994-01-01") ,(date->days "1995-01-01"))
+               (date->days "1994-01-01") (date->days "1995-01-01"))
       tpch-q5-expected))
 
   (test-assert "Q6"
     (check-expected
       (tpch-q6 (ByName lineitem)
-               ,(date->days "1994-01-01") ,(date->days "1995-01-01"))
+               (date->days "1994-01-01") (date->days "1995-01-01"))
       tpch-q6-expected))
 
   (test-assert "Q7"
     (check-expected
       (tpch-q7 (ByName nation) (ByName supplier) (ByName orders) (ByName customer)
                (ByName lineitem)
-               ,(date->days "1995-01-01") ,(date->days "1996-12-31"))
+               (date->days "1995-01-01") (date->days "1996-12-31"))
       tpch-q7-expected))
 
   (test-assert "Q8"
     (check-expected
       (tpch-q8 (ByName nation) (ByName region) (ByName customer) (ByName supplier)
                (ByName part) (ByName orders) (ByName lineitem)
-               ,(date->days "1995-01-01") ,(date->days "1996-12-31"))
+               (date->days "1995-01-01") (date->days "1996-12-31"))
       tpch-q8-expected))
 
   (test-assert "Q9"
@@ -98,7 +105,7 @@
   (test-assert "Q10"
     (check-expected
       (tpch-q10 (ByName orders) (ByName customer) (ByName lineitem) (ByName nation)
-                ,(date->days "1993-10-01") ,(date->days "1994-01-01"))
+                (date->days "1993-10-01") (date->days "1994-01-01"))
       tpch-q10-expected))
 
   (test-assert "Q11"
@@ -109,7 +116,7 @@
   (test-assert "Q12"
     (check-expected
       (tpch-q12 (ByName orders) (ByName lineitem)
-                ,(date->days "1994-01-01") ,(date->days "1995-01-01"))
+                (date->days "1994-01-01") (date->days "1995-01-01"))
       tpch-q12-expected))
 
   (test-assert "Q13"
@@ -120,7 +127,7 @@
   (test-assert "Q14"
     (check-expected
       (tpch-q14 (ByName lineitem) (ByName part)
-                ,(date->days "1995-09-01") ,(date->days "1995-10-01"))
+                (date->days "1995-09-01") (date->days "1995-10-01"))
       tpch-q14-expected))
 
   (test-assert "Q16"
@@ -142,7 +149,7 @@
     (check-expected
       (tpch-q20 (ByName part) (ByName lineitem) (ByName partsupp) (ByName nation)
                 (ByName supplier)
-                ,(date->days "1994-01-01") ,(date->days "1995-01-01"))
+                (date->days "1994-01-01") (date->days "1995-01-01"))
       tpch-q20-expected))
 
   (test-assert "Q21"

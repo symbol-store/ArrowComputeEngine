@@ -1,10 +1,17 @@
-(import (scheme base)
-        (scheme load)
+(import (scheme load)
         (chibi time)
-        (chibi test)
-        (BOSS))
+        (chibi test))
 
 (boss-eval (SetDefaultEnginePipeline "Build/libArrowComputeEngine.so"))
+
+;;; boss-run must be defined here (not in tpch-queries.scm) because macro
+;;; expansions look up boss-run in the call-site environment.  Chibi's
+;;; (import ...) creates a scope local to the loaded file, so definitions
+;;; inside tpch-queries.scm after its own import are invisible here.
+(define (boss-run expr)
+  (let ((b (convert-to-boss-expression expr)))
+    (boss-expression-transfer! b)
+    (convert-from-boss-expression (BOSSEvaluate b))))
 
 ;;; Load shared TPC-H query plans
 (load "Tests/tpch-queries.scm")

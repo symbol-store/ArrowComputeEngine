@@ -46,7 +46,7 @@ ExternalProject_Add(Arrow
   DOWNLOAD_EXTRACT_TIMESTAMP NEW
   DOWNLOAD_DIR $ENV{HOME}/.cmake-downloads/${CMAKE_PROJECT_NAME}
   SOURCE_SUBDIR cpp
-  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${ArrowComputeEngine_BINARY_DIR}/deps $<IF:$<CONFIG:>,,-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}> -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_FILESYSTEM=ON -DARROW_ACERO=ON ARROW_JEMALLOC_USE_SHARED=OFF ARROW_SIMD_LEVEL=NONE ARROW_RUNTIME_SIMD_LEVEL=NONE ARROW_ENABLE_THREADING=OFF ARROW_JEMALLOC=ON ARROW_IPC=OFF
+  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${ArrowComputeEngine_BINARY_DIR}/deps $<IF:$<CONFIG:>,,-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}> -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_FILESYSTEM=ON -DARROW_ACERO=ON -DARROW_BUILD_STATIC=ON -DARROW_BUILD_SHARED=OFF -DARROW_JEMALLOC=OFF -DARROW_SIMD_LEVEL=NONE -DARROW_RUNTIME_SIMD_LEVEL=NONE -DARROW_IPC=OFF -Dutf8proc_SOURCE=BUNDLED
   )
   
 
@@ -68,10 +68,12 @@ endif(MSVC)
 target_include_directories(ArrowComputeEngine SYSTEM PUBLIC ${ArrowComputeEngine_BINARY_DIR}/deps/include)
 add_dependencies(ArrowComputeEngine BOSS)
 add_dependencies(ArrowComputeEngine Arrow)
-target_link_libraries(ArrowComputeEngine PUBLIC "arrow")
-target_link_libraries(ArrowComputeEngine PUBLIC "arrow_compute")
-target_link_libraries(ArrowComputeEngine PUBLIC "arrow_acero")
-target_link_directories(ArrowComputeEngine PUBLIC ${ArrowComputeEngine_BINARY_DIR}/deps/lib)
+target_link_libraries(ArrowComputeEngine PUBLIC
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow.a
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_compute.a
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_acero.a
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_bundled_dependencies.a
+)
 
 
 

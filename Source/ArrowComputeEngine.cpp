@@ -84,12 +84,27 @@ static struct {
     boss::ExpressionArguments resultExpression;
     for(auto i = 0u; i < table->num_columns(); i++) {
       auto resultColumn = table->column(i);
-      auto visitor = ColumnConverter();
-      for(auto i = 0u; i < resultColumn->length(); i++) {
-        auto _ = arrow::VisitScalarInline(*resultColumn->GetScalar(i).ValueUnsafe(), &visitor);
+      auto f = table->field(i);
+      auto md = f->metadata();
+      bool isSymbolCol = md && md->FindKey("boss_type") >= 0 &&
+                         md->value(md->FindKey("boss_type")) == "symbol";
+      boss::ExpressionArguments colValues;
+      if(isSymbolCol) {
+        for(auto j = 0u; j < resultColumn->length(); j++) {
+          auto scalar = resultColumn->GetScalar(j).ValueUnsafe();
+          if(!scalar->is_valid)
+            colValues.push_back("NULL"_);
+          else
+            colValues.push_back(boss::Symbol(std::string(
+                std::static_pointer_cast<arrow::StringScalar>(scalar)->view())));
+        }
+      } else {
+        auto visitor = ColumnConverter();
+        for(auto j = 0u; j < resultColumn->length(); j++)
+          (void)arrow::VisitScalarInline(*resultColumn->GetScalar(j).ValueUnsafe(), &visitor);
+        colValues = std::move(visitor).getColumnValues();
       }
-      resultExpression.push_back(ComplexExpression(boss::Symbol(table->field(i)->name()),
-                                                   std::move(visitor).getColumnValues()));
+      resultExpression.push_back(ComplexExpression(boss::Symbol(f->name()), std::move(colValues)));
     }
     return ComplexExpression("Table"_, {}, std::move(resultExpression));
   };
@@ -106,7 +121,7 @@ static std::string toArrowName(std::string name) {
   static std::unordered_map<std::string, std::string> const aliases = {
       {"countall", "count_all"}, {"ifelse", "if_else"},   {"lessequal", "less_equal"},
       {"greaterequal", "greater_equal"}, {"notequal", "not_equal"}, {"not", "invert"},
-      {"avg", "mean"},
+      {"avg", "mean"}, {"isvalid", "is_valid"},
   };
   auto it = aliases.find(name);
   return it != aliases.end() ? it->second : name;
@@ -360,6 +375,20 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        });
                      },
                      *firstTyped);
+               else {
+                 auto builder = arrow::StringBuilder{};
+                 for(auto& span : spanArguments)
+                   std::visit([&](auto& s) {
+                     using Scalar = std::remove_const_t<
+                         typename std::decay_t<decltype(s)>::element_type>;
+                     if constexpr(std::is_same_v<Scalar, Symbol>)
+                       for(auto& sym : s)
+                         (void)builder.Append(sym.getName());
+                   }, span);
+                 arrays.push_back(*builder.Finish());
+                 fields.push_back(arrow::field(columnName, arrow::utf8(), true,
+                     arrow::key_value_metadata({"boss_type"}, {"symbol"})));
+               }
              } else {
                auto& dynamicArguments = column.getDynamicArguments();
                auto firstNonNull =
@@ -381,6 +410,14 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                },
                            [](auto&&) {}),
                        *firstNonNull);
+               else {
+                 auto builder = arrow::StringBuilder{};
+                 for(auto& argument : dynamicArguments)
+                   (void)builder.Append(get<Symbol>(argument).getName());
+                 arrays.push_back(*builder.Finish());
+                 fields.push_back(arrow::field(columnName, arrow::utf8(), true,
+                     arrow::key_value_metadata({"boss_type"}, {"symbol"})));
+               }
              }
            }
            return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));

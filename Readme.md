@@ -11,12 +11,16 @@ The engine was originally developed to support a **performance engineering cours
 | Operator | Description |
 |---|---|
 | `Load(path)` | Read a CSV file into an in-memory Arrow table |
-| `Project(table col ...)` | Select and rename columns; supports `(int col)` for type casts and arbitrary Arrow compute functions |
-| `OrderBy(table (keys col ...))` | Sort rows by one or more columns |
-| `GroupBy(table (agg col) [key])` | Aggregate a column (`sum`, `mean`, `max`, `count`, …). Without `key` it is a global aggregate; with `key` it is a hash-aggregate |
+| `Table((col val ...) ...)` | Construct an in-memory table from literal column data; symbol values are stored as named nulls |
+| `Filter(table pred)` | Keep only rows where `pred` holds; supports `And`, `Or`, `Not` and all Arrow comparison/compute functions |
+| `Project(table col ...)` | Select and rename columns; supports `(As expr name)` aliasing, `(Int col)` for type casts, and arbitrary Arrow compute functions |
+| `OrderBy(table (List col ...))` | Sort rows by one or more columns; wrap a column in `(Desc col)` to sort descending |
+| `GroupBy(table (agg col) [key ...])` | Aggregate a column (`Sum`, `Mean`, `Max`, `CountAll`, …). Without keys it is a global aggregate; with keys it is a hash-aggregate |
 | `Cumulate(table (agg col))` | Running (prefix) aggregate, e.g. cumulative sum |
 | `Pairwise(table out-col in-col lag)` | Sliding-window difference: `out[i] = in[i+lag] − in[i]` |
-| `Join(left (keys ...) right (keys ...))` | Inner hash join on matching key columns |
+| `Join(left (List key ...) right (List key ...))` | Inner hash join on matching key columns; colliding column names get `_l`/`_r` suffixes |
+| `LeftJoin(left (List key ...) right (List key ...))` | Left outer hash join |
+| `AntiJoin(left (List key ...) right (List key ...))` | Left anti join — rows in `left` with no match in `right` |
 | `Name(table sym)` | Store a table under a named handle for later retrieval |
 | `ByName(sym)` | Retrieve a previously named table |
 | `Materialize(table)` | Force materialisation of chunked Arrow arrays into a single contiguous buffer |

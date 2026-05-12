@@ -23,6 +23,7 @@ The engine was originally developed to support a **performance engineering cours
 | `AntiJoin(left (List key ...) right (List key ...))` | Left anti join — rows in `left` with no match in `right` |
 | `Name(table sym)` | Store a table under a named handle for later retrieval |
 | `ByName(sym)` | Retrieve a previously named table |
+| `Schema(table)` | Return a one-column table `(Columns A B C …)` listing the column names of `table` as symbols |
 | `Materialize(table)` | Force materialisation of chunked Arrow arrays into a single contiguous buffer |
 | `Slice(table offset count)` | Fetch a contiguous slice of rows |
 | `ToStatus(table)` | Evaluate a pipeline and return `"OK"` rather than materialising the result (useful during profiling) |

@@ -334,6 +334,15 @@ static boss::Expression evaluate(boss::Expression&& e) {
          } < "Materialize"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return intermediates.putTable(
                *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks());
+         } < "Schema"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
+           auto builder = arrow::StringBuilder{};
+           for(auto i = 0; i < input->num_columns(); i++)
+             (void)builder.Append(input->field(i)->name());
+           return intermediates.putTable(arrow::Table::Make(
+               arrow::schema({arrow::field("Columns", arrow::utf8(), true,
+                   arrow::key_value_metadata({"boss_type"}, {"symbol"}))}),
+               {*builder.Finish()}));
          } < "Table"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto fields = std::vector<std::shared_ptr<arrow::Field>>();
            auto arrays = std::vector<std::shared_ptr<arrow::Array>>();

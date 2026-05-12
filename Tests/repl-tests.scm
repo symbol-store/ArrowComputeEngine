@@ -32,6 +32,20 @@
         '(Table (A 1 NULL 3))
         (boss-eval (Table (A 1 NULL 3))))
 
+  ;;; Schema
+
+  (test "Schema: returns column names as symbols"
+        '(Table (Columns A B C))
+        (boss-eval (Schema (Table (A 1 2 3) (B 4 5 6) (C 7 8 9)))))
+
+  (test "Schema: single-column table"
+        '(Table (Columns X))
+        (boss-eval (Schema (Table (X 42)))))
+
+  (test "Schema: column names from a derived table"
+        '(Table (Columns A))
+        (boss-eval (Schema (Project (Table (A 1 2 3) (B 4 5 6)) A))))
+
   ;;; Filter
 
   (test "Filter: greater"

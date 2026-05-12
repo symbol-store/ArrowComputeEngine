@@ -32,6 +32,14 @@
         '(Table (A 1 NULL 3))
         (boss-eval (Table (A 1 NULL 3))))
 
+  (test "Table: all-symbol column values are preserved"
+        '(Table (x y z))
+        (boss-eval (Table (x y z))))
+
+  (test "Table: symbol column alongside typed column"
+        '(Table (flags y z) (values 1 2))
+        (boss-eval (Table (flags y z) (values 1 2))))
+
   ;;; Schema
 
   (test "Schema: returns column names as symbols"

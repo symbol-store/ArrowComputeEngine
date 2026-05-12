@@ -72,6 +72,23 @@
         '(Table (A 2) (B 20))
         (boss-eval (Filter (Table (A 1 2 3) (B 10 20 30)) (Equal A 2))))
 
+  (test "Filter: symbol constant matches symbol-typed column"
+        '(Table (sport Running Running) (distance 5 3))
+        (boss-eval
+          (Filter (Table (sport Running Swimming Running) (distance 5 10 3))
+                  (Equal sport Running))))
+
+  (test "Filter: symbol constant — no match returns empty table"
+        '(Table (sport) (distance))
+        (boss-eval
+          (Filter (Table (sport Running Swimming) (distance 5 10))
+                  (Equal sport Cycling))))
+
+  (test "Filter: symbol in predicate naming a column is treated as column ref"
+        '(Table (A 1) (B 1))
+        (boss-eval
+          (Filter (Table (A 1 2) (B 1 3)) (Equal A B))))
+
   ;;; Project
 
   (test "Project: select one column"

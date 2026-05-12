@@ -86,8 +86,8 @@ static struct {
       auto resultColumn = table->column(i);
       auto f = table->field(i);
       auto md = f->metadata();
-      bool isSymbolCol = md && md->FindKey("boss_type") >= 0 &&
-                         md->value(md->FindKey("boss_type")) == "symbol";
+      bool isSymbolCol =
+          md && md->FindKey("boss_type") >= 0 && md->value(md->FindKey("boss_type")) == "symbol";
       boss::ExpressionArguments colValues;
       if(isSymbolCol) {
         for(auto j = 0u; j < resultColumn->length(); j++) {
@@ -95,8 +95,8 @@ static struct {
           if(!scalar->is_valid)
             colValues.push_back("NULL"_);
           else
-            colValues.push_back(boss::Symbol(std::string(
-                std::static_pointer_cast<arrow::StringScalar>(scalar)->view())));
+            colValues.push_back(boss::Symbol(
+                std::string(std::static_pointer_cast<arrow::StringScalar>(scalar)->view())));
         }
       } else {
         auto visitor = ColumnConverter();
@@ -113,58 +113,72 @@ static struct {
                ? dynamic_cast<arrow::acero::TableSourceNodeOptions*>(d.options.get())->table
                : (*DeclarationToTable(d, false));
   };
+  std::set<std::string> columnNames(boss::Expression const& key) {
+    auto fieldNames = getTable(at(key))->schema()->field_names();
+    return {fieldNames.begin(), fieldNames.end()};
+  };
 
 } intermediates;
 
 static std::string toArrowName(std::string name) {
   std::transform(name.begin(), name.end(), name.begin(), ::tolower);
   static std::unordered_map<std::string, std::string> const aliases = {
-      {"countall", "count_all"}, {"ifelse", "if_else"},   {"lessequal", "less_equal"},
-      {"greaterequal", "greater_equal"}, {"notequal", "not_equal"}, {"not", "invert"},
-      {"avg", "mean"}, {"isvalid", "is_valid"},
+      {"countall", "count_all"},
+      {"ifelse", "if_else"},
+      {"lessequal", "less_equal"},
+      {"greaterequal", "greater_equal"},
+      {"notequal", "not_equal"},
+      {"not", "invert"},
+      {"avg", "mean"},
+      {"isvalid", "is_valid"},
   };
   auto it = aliases.find(name);
   return it != aliases.end() ? it->second : name;
 }
 
-static compute::Expression toComputeExpression(boss::Expression const& e) {
+static compute::Expression toComputeExpression(boss::Expression const& e,
+                                               std::set<std::string> const& columns = {}) {
   return std::visit(
-      boss::utilities::overload([](Symbol const& s) { return compute::field_ref(s.getName()); },
-                                [](std::string const& s) {
-                                  return compute::literal(std::make_shared<arrow::StringScalar>(s));
-                                },
-                                [](ComplexExpression const& ce) {
-                                  auto name = toArrowName(ce.getHead().getName());
-                                  auto operands = std::vector<compute::Expression>();
-                                  for(auto const& arg : ce.getDynamicArguments()) {
-                                    auto expr = toComputeExpression(arg);
-                                    auto* s = std::set<std::string_view>{"less", "less_equal",
-                                        "greater", "greater_equal", "equal", "not_equal"}.count(name)
-                                        ? std::get_if<std::string>(&arg) : nullptr;
-                                    operands.push_back(
-                                        s && s->size() == 10 && (*s)[4] == '-' && (*s)[7] == '-'
-                                            ? compute::call("cast", {std::move(expr)},
-                                                            compute::CastOptions::Unsafe(arrow::date32()))
-                                            : std::move(expr));
-                                  }
-                                  if(name == "date")
-                                    return compute::call(
-                                        "cast", operands,
-                                        compute::CastOptions::Unsafe(arrow::date32()));
-                                  else if(name == "timestamp")
-                                    return compute::call(
-                                        "cast", operands,
-                                        compute::CastOptions::Unsafe(
-                                            arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
-                                  else if(name == "like")
-                                    return compute::call(
-                                        "match_like", {operands[0]},
-                                        compute::MatchSubstringOptions{
-                                            std::get<std::string>(ce.getDynamicArguments().at(1))});
-                                  else
-                                    return compute::call(name, operands);
-                                },
-                                [](auto v) { return compute::literal(v); }),
+      boss::utilities::overload(
+          // symbol: column ref if the name exists in the schema, otherwise a symbol-value literal
+          [&columns](Symbol const& s) {
+            return columns.count(s.getName())
+                       ? compute::field_ref(s.getName())
+                       : compute::literal(std::make_shared<arrow::StringScalar>(s.getName()));
+          },
+          [](std::string const& s) {
+            return compute::literal(std::make_shared<arrow::StringScalar>(s));
+          },
+          [&columns](ComplexExpression const& ce) {
+            auto name = toArrowName(ce.getHead().getName());
+            auto operands = std::vector<compute::Expression>();
+            for(auto const& arg : ce.getDynamicArguments()) {
+              auto expr = toComputeExpression(arg, columns);
+              // auto-cast bare YYYY-MM-DD string literals to date32 in comparisons
+              auto* s = std::set<std::string_view> {"less",          "less_equal", "greater",
+                                                    "greater_equal", "equal",      "not_equal"}
+                                .count(name)
+                            ? std::get_if<std::string>(&arg)
+                            : nullptr;
+              operands.push_back(s && s->size() == 10 && (*s)[4] == '-' && (*s)[7] == '-'
+                                     ? compute::call("cast", {std::move(expr)},
+                                                     compute::CastOptions::Unsafe(arrow::date32()))
+                                     : std::move(expr));
+            }
+            if(name == "date")
+              return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::date32()));
+            else if(name == "timestamp")
+              return compute::call(
+                  "cast", operands,
+                  compute::CastOptions::Unsafe(arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
+            else if(name == "like")
+              return compute::call("match_like", {operands[0]},
+                                   compute::MatchSubstringOptions {
+                                       std::get<std::string>(ce.getDynamicArguments().at(1))});
+            else
+              return compute::call(name, operands);
+          },
+          [](auto v) { return compute::literal(v); }),
       e);
 }
 
@@ -230,10 +244,12 @@ static boss::Expression evaluate(boss::Expression&& e) {
          } < "ByName"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return intermediates.byName(get<boss::Symbol>(dynamics.at(0)));
          } < "Filter"_(Any_, Any_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           auto columns = intermediates.columnNames(dynamics.at(0));
            return intermediates.put(Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
-                {"filter", FilterNodeOptions(toComputeExpression(dynamics.at(1)))}}));
+                {"filter", FilterNodeOptions(toComputeExpression(dynamics.at(1), columns))}}));
          } < "Project"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+           auto columns = intermediates.columnNames(dynamics.at(0));
            auto projections = std::vector<compute::Expression>();
            auto names = std::vector<std::string>();
            for(auto i = 1; i < dynamics.size(); i++)
@@ -246,22 +262,22 @@ static boss::Expression evaluate(boss::Expression&& e) {
                          auto headName = s.getHead().getName();
                          auto const& args = s.getDynamicArguments();
                          if(headName == "As") {
-                           projections.push_back(toComputeExpression(args.at(0)));
+                           projections.push_back(toComputeExpression(args.at(0), columns));
                            names.push_back(get<Symbol>(args.at(1)).getName());
                          } else {
                            auto arguments = std::vector<compute::Expression>();
                            for(auto const& it : args)
-                             arguments.push_back(toComputeExpression(it));
-                           // "Int"/"Timestamp" map to casts — Arrow compute doesn't expose these by name
+                             arguments.push_back(toComputeExpression(it, columns));
+                           // "Int"/"Timestamp" map to casts — Arrow compute doesn't expose these by
+                           // name
                            auto expr =
                                headName == "Int"
                                    ? compute::call("cast", arguments,
                                                    compute::CastOptions::Unsafe(int32()))
                                : headName == "Timestamp"
-                                   ? compute::call(
-                                         "cast", arguments,
-                                         compute::CastOptions::Unsafe(
-                                             arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")))
+                                   ? compute::call("cast", arguments,
+                                                   compute::CastOptions::Unsafe(arrow::timestamp(
+                                                       arrow::TimeUnit::SECOND, "UTC")))
                                    : compute::call(toArrowName(headName), arguments);
                            projections.push_back(expr);
                            names.push_back(headName == "Int"
@@ -289,7 +305,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                aggregates.emplace_back(functionName, functionName + "()");
              } else {
                auto const col = get<Symbol>(args.at(0));
-               aggregates.push_back({functionName, col.getName(), functionName + "(" + col.getName() + ")"});
+               aggregates.push_back(
+                   {functionName, col.getName(), functionName + "(" + col.getName() + ")"});
              }
            }
            for(; i < dynamics.size(); ++i)
@@ -313,11 +330,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
                compute::CallFunction("cumulative_" + functionName,
                                      {input->GetColumnByName(aggregationAttribute.getName())})
                    ->chunked_array();
-           return intermediates.putTable(
-               *input->AddColumn(input->num_columns(),
-                                 field(functionName + "(" + aggregationAttribute.getName() + ")",
-                                       result->type()),
-                                 result));
+           return intermediates.putTable(*input->AddColumn(
+               input->num_columns(),
+               field(functionName + "(" + aggregationAttribute.getName() + ")", result->type()),
+               result));
          } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
@@ -336,12 +352,12 @@ static boss::Expression evaluate(boss::Expression&& e) {
                *intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks());
          } < "Schema"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
-           auto builder = arrow::StringBuilder{};
+           auto builder = arrow::StringBuilder {};
            for(auto i = 0; i < input->num_columns(); i++)
              (void)builder.Append(input->field(i)->name());
            return intermediates.putTable(arrow::Table::Make(
                arrow::schema({arrow::field("Columns", arrow::utf8(), true,
-                   arrow::key_value_metadata({"boss_type"}, {"symbol"}))}),
+                                           arrow::key_value_metadata({"boss_type"}, {"symbol"}))}),
                {*builder.Finish()}));
          } < "Table"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto fields = std::vector<std::shared_ptr<arrow::Field>>();
@@ -385,18 +401,21 @@ static boss::Expression evaluate(boss::Expression&& e) {
                      },
                      *firstTyped);
                else {
-                 auto builder = arrow::StringBuilder{};
+                 auto builder = arrow::StringBuilder {};
                  for(auto& span : spanArguments)
-                   std::visit([&](auto& s) {
-                     using Scalar = std::remove_const_t<
-                         typename std::decay_t<decltype(s)>::element_type>;
-                     if constexpr(std::is_same_v<Scalar, Symbol>)
-                       for(auto& sym : s)
-                         (void)builder.Append(sym.getName());
-                   }, span);
+                   std::visit(
+                       [&](auto& s) {
+                         using Scalar =
+                             std::remove_const_t<typename std::decay_t<decltype(s)>::element_type>;
+                         if constexpr(std::is_same_v<Scalar, Symbol>)
+                           for(auto& sym : s)
+                             (void)builder.Append(sym.getName());
+                       },
+                       span);
                  arrays.push_back(*builder.Finish());
-                 fields.push_back(arrow::field(columnName, arrow::utf8(), true,
-                     arrow::key_value_metadata({"boss_type"}, {"symbol"})));
+                 fields.push_back(
+                     arrow::field(columnName, arrow::utf8(), true,
+                                  arrow::key_value_metadata({"boss_type"}, {"symbol"})));
                }
              } else {
                auto& dynamicArguments = column.getDynamicArguments();
@@ -420,46 +439,50 @@ static boss::Expression evaluate(boss::Expression&& e) {
                            [](auto&&) {}),
                        *firstNonNull);
                else {
-                 auto builder = arrow::StringBuilder{};
+                 auto builder = arrow::StringBuilder {};
                  for(auto& argument : dynamicArguments)
                    (void)builder.Append(get<Symbol>(argument).getName());
                  arrays.push_back(*builder.Finish());
-                 fields.push_back(arrow::field(columnName, arrow::utf8(), true,
-                     arrow::key_value_metadata({"boss_type"}, {"symbol"})));
+                 fields.push_back(
+                     arrow::field(columnName, arrow::utf8(), true,
+                                  arrow::key_value_metadata({"boss_type"}, {"symbol"})));
                }
              }
            }
            return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));
          } < "Load"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return std::visit(
-               boss::utilities::overload(
-                   [&dynamics](std::string&& path) -> boss::Expression {
-                     std::vector<std::string> columnNames;
-                     for(auto i = 1u; i < dynamics.size(); ++i)
-                       columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
-                     auto readOptions    = csv::ReadOptions::Defaults();
-                     auto parseOptions   = csv::ParseOptions::Defaults();
-                     auto convertOptions = csv::ConvertOptions::Defaults();
-                     readOptions.use_threads = false;
-                     readOptions.block_size  = 1 << 26;
-                     bool isTbl = path.size() > 4 && path.substr(path.size() - 4) == ".tbl";
-                     if(isTbl) parseOptions.delimiter = '|';
-                     if(!columnNames.empty()) {
-                       auto withTrailing = columnNames;
-                       if(isTbl) withTrailing.push_back("_trailing");
-                       readOptions.column_names       = withTrailing;
-                       convertOptions.include_columns = columnNames;
-                     }
-                     auto maybeTable =
-                         (*csv::TableReader::Make(io::default_io_context(),
-                                                  *io::ReadableFile::Open(path), readOptions,
-                                                  parseOptions, convertOptions))
-                             ->Read();
-                     if(!maybeTable.ok()) return maybeTable.status().ToStringWithoutContextLines();
-                     return intermediates.putTable(*(*maybeTable)->CombineChunks());
-                   },
-                   [](auto&& e) -> boss::Expression { return e; }),
-               std::move(dynamics.at(0)));
+           return std::visit(boss::utilities::overload(
+                                 [&dynamics](std::string&& path) -> boss::Expression {
+                                   std::vector<std::string> columnNames;
+                                   for(auto i = 1u; i < dynamics.size(); ++i)
+                                     columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
+                                   auto readOptions = csv::ReadOptions::Defaults();
+                                   auto parseOptions = csv::ParseOptions::Defaults();
+                                   auto convertOptions = csv::ConvertOptions::Defaults();
+                                   readOptions.use_threads = false;
+                                   readOptions.block_size = 1 << 26;
+                                   bool isTbl =
+                                       path.size() > 4 && path.substr(path.size() - 4) == ".tbl";
+                                   if(isTbl)
+                                     parseOptions.delimiter = '|';
+                                   if(!columnNames.empty()) {
+                                     auto withTrailing = columnNames;
+                                     if(isTbl)
+                                       withTrailing.push_back("_trailing");
+                                     readOptions.column_names = withTrailing;
+                                     convertOptions.include_columns = columnNames;
+                                   }
+                                   auto maybeTable =
+                                       (*csv::TableReader::Make(
+                                            io::default_io_context(), *io::ReadableFile::Open(path),
+                                            readOptions, parseOptions, convertOptions))
+                                           ->Read();
+                                   if(!maybeTable.ok())
+                                     return maybeTable.status().ToStringWithoutContextLines();
+                                   return intermediates.putTable(*(*maybeTable)->CombineChunks());
+                                 },
+                                 [](auto&& e) -> boss::Expression { return e; }),
+                             std::move(dynamics.at(0)));
          };
 };
 

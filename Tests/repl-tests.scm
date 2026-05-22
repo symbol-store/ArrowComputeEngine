@@ -54,6 +54,31 @@
         '(Table (Columns A))
         (boss-eval (Schema (Project (Table (A 1 2 3) (B 4 5 6)) A))))
 
+  ;;; Bool
+
+  (test "Table: boolean column"
+        '(Table (flags #t #f #t))
+        (boss-eval (Table (flags #t #f #t))))
+
+  (test "Table: boolean column with NULLs"
+        '(Table (flags #t NULL #f))
+        (boss-eval (Table (flags #t NULL #f))))
+
+  (test "Filter: boolean column as predicate"
+        '(Table (A 1 3) (active #t #t))
+        (boss-eval
+          (Filter (Table (A 1 2 3) (active #t #f #t)) active)))
+
+  (test "Filter: equal comparison on boolean column"
+        '(Table (A 2) (active #f))
+        (boss-eval
+          (Filter (Table (A 1 2 3) (active #t #f #t)) (Equal active #f))))
+
+  (test "Project: Bool cast converts integer to boolean"
+        '(Table (flag #f #t #t))
+        (boss-eval
+          (Project (Table (x 0 1 1)) (As (Bool x) flag))))
+
   ;;; Filter
 
   (test "Filter: greater"

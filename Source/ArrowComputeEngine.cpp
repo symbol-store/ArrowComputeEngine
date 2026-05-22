@@ -175,6 +175,9 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
               return compute::call("match_like", {operands[0]},
                                    compute::MatchSubstringOptions {
                                        std::get<std::string>(ce.getDynamicArguments().at(1))});
+            else if(name == "bool")
+              return compute::call("cast", operands,
+                                   compute::CastOptions::Unsafe(arrow::boolean()));
             else
               return compute::call(name, operands);
           },
@@ -191,6 +194,8 @@ template <typename T, typename F> static void withBuilder(F&& use) {
     use(arrow::FloatBuilder {}, arrow::float32());
   else if constexpr(std::is_same_v<T, std::string>)
     use(arrow::StringBuilder {}, arrow::utf8());
+  else if constexpr(std::is_same_v<T, bool>)
+    use(arrow::BooleanBuilder {}, arrow::boolean());
   else
     throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
 }
@@ -268,7 +273,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
                            auto arguments = std::vector<compute::Expression>();
                            for(auto const& it : args)
                              arguments.push_back(toComputeExpression(it, columns));
-                           // "Int"/"Timestamp" map to casts — Arrow compute doesn't expose these by
+                           // "Int"/"Timestamp"/"Bool" map to casts — Arrow compute doesn't expose these by
                            // name
                            auto expr =
                                headName == "Int"
@@ -278,12 +283,17 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                    ? compute::call("cast", arguments,
                                                    compute::CastOptions::Unsafe(arrow::timestamp(
                                                        arrow::TimeUnit::SECOND, "UTC")))
+                               : headName == "Bool"
+                                   ? compute::call("cast", arguments,
+                                                   compute::CastOptions::Unsafe(arrow::boolean()))
                                    : compute::call(toArrowName(headName), arguments);
                            projections.push_back(expr);
                            names.push_back(headName == "Int"
                                                ? "int(" + arguments.back().ToString() + ")"
                                            : headName == "Timestamp"
                                                ? "timestamp(" + arguments.back().ToString() + ")"
+                                           : headName == "Bool"
+                                               ? "bool(" + arguments.back().ToString() + ")"
                                                : expr.ToString());
                          }
                        },

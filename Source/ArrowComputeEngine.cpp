@@ -10,6 +10,7 @@
 #include <arrow/compute/api_aggregate.h>
 #include <arrow/csv/api.h>
 #include <arrow/io/api.h>
+#include <limits>
 #include <memory>
 #include <random>
 #include <set>
@@ -56,7 +57,8 @@ static struct {
 
   int64_t generateID() {
     static std::default_random_engine generator(std::random_device {}());
-    return std::uniform_int_distribution<int64_t>(LONG_LONG_MIN, LONG_LONG_MAX)(generator);
+    return std::uniform_int_distribution<int64_t>(std::numeric_limits<int64_t>::min(),
+                                                  std::numeric_limits<int64_t>::max())(generator);
   };
 
   boss::Expression name(boss::Expression&& key, boss::Symbol name) {
@@ -273,8 +275,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                            auto arguments = std::vector<compute::Expression>();
                            for(auto const& it : args)
                              arguments.push_back(toComputeExpression(it, columns));
-                           // "Int"/"Timestamp"/"Bool" map to casts — Arrow compute doesn't expose these by
-                           // name
+                           // "Int"/"Timestamp"/"Bool" map to casts — Arrow compute doesn't expose
+                           // these by name
                            auto expr =
                                headName == "Int"
                                    ? compute::call("cast", arguments,
@@ -288,13 +290,12 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                                    compute::CastOptions::Unsafe(arrow::boolean()))
                                    : compute::call(toArrowName(headName), arguments);
                            projections.push_back(expr);
-                           names.push_back(headName == "Int"
-                                               ? "int(" + arguments.back().ToString() + ")"
-                                           : headName == "Timestamp"
-                                               ? "timestamp(" + arguments.back().ToString() + ")"
-                                           : headName == "Bool"
-                                               ? "bool(" + arguments.back().ToString() + ")"
-                                               : expr.ToString());
+                           names.push_back(
+                               headName == "Int" ? "int(" + arguments.back().ToString() + ")"
+                               : headName == "Timestamp"
+                                   ? "timestamp(" + arguments.back().ToString() + ")"
+                               : headName == "Bool" ? "bool(" + arguments.back().ToString() + ")"
+                                                    : expr.ToString());
                          }
                        },
                        [](auto&&) {}),

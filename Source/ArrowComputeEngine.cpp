@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <set>
 #include <unordered_map>
 using namespace boss::utilities::experimental;
@@ -76,7 +77,16 @@ static struct {
     return put({"table_source", TableSourceNodeOptions(std::move(table))});
   };
   Declaration const& at(boss::Expression const& key) {
-    return intermediates.at(std::get<int64_t>(key));
+    return std::visit(
+        boss::utilities::overload(
+            [this](int64_t k) -> Declaration const& { return intermediates.at(k); },
+            [](auto const& v) -> Declaration const& {
+              auto ss = std::ostringstream{};
+              ss << "no intermediate found for key " << v
+                 << " (input was not produced by the arrow engine)";
+              throw std::runtime_error(ss.str());
+            }),
+        key);
   }
 
   boss::Expression convertResult(boss::Expression const& key) {

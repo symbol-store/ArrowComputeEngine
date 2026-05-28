@@ -183,7 +183,9 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
                                                      compute::CastOptions::Unsafe(arrow::date32()))
                                      : std::move(expr));
             }
-            if(name == "date")
+            if(name == "int")
+              return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::int32()));
+            else if(name == "date")
               return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::date32()));
             else if(name == "timestamp")
               return compute::call(
@@ -282,36 +284,14 @@ static boss::Expression evaluate(boss::Expression&& e) {
                          names.push_back(s.getName());
                        },
                        [&](ComplexExpression&& s) {
-                         auto headName = s.getHead().getName();
-                         auto const& args = s.getDynamicArguments();
-                         if(headName == "As") {
+                         if(s.getHead().getName() == "As") {
+                           auto const& args = s.getDynamicArguments();
                            projections.push_back(toComputeExpression(args.at(0), columns));
                            names.push_back(get<Symbol>(args.at(1)).getName());
                          } else {
-                           auto arguments = std::vector<compute::Expression>();
-                           for(auto const& it : args)
-                             arguments.push_back(toComputeExpression(it, columns));
-                           // "Int"/"Timestamp"/"Bool" map to casts — Arrow compute doesn't expose
-                           // these by name
-                           auto expr =
-                               headName == "Int"
-                                   ? compute::call("cast", arguments,
-                                                   compute::CastOptions::Unsafe(int32()))
-                               : headName == "Timestamp"
-                                   ? compute::call("cast", arguments,
-                                                   compute::CastOptions::Unsafe(arrow::timestamp(
-                                                       arrow::TimeUnit::SECOND, "UTC")))
-                               : headName == "Bool"
-                                   ? compute::call("cast", arguments,
-                                                   compute::CastOptions::Unsafe(arrow::boolean()))
-                                   : compute::call(toArrowName(headName), arguments);
+                           auto expr = toComputeExpression(boss::Expression{std::move(s)}, columns);
                            projections.push_back(expr);
-                           names.push_back(
-                               headName == "Int" ? "int(" + arguments.back().ToString() + ")"
-                               : headName == "Timestamp"
-                                   ? "timestamp(" + arguments.back().ToString() + ")"
-                               : headName == "Bool" ? "bool(" + arguments.back().ToString() + ")"
-                                                    : expr.ToString());
+                           names.push_back(expr.ToString());
                          }
                        },
                        [](auto&&) {}),

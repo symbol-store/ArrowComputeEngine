@@ -564,6 +564,27 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                  },
                                  [](auto&& e) -> boss::Expression { return e; }),
                              std::move(dynamics.at(0)));
+         } < "GetEngineDescription"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto, auto) {
+           return R"(
+Load(path)                          Read a CSV file into an in-memory Arrow table
+Table((col val ...) ...)            Construct an in-memory table from literal column data; symbol values are stored as named nulls
+Filter(table pred)                  Keep only rows where pred holds; supports And, Or, Not and all Arrow comparison/compute functions
+Project(table col ...)              Select and rename columns; supports (As expr name) aliasing, (Int col)/(Bool col) for type casts, and arbitrary Arrow compute functions
+OrderBy(table (List col ...))       Sort rows by one or more columns; wrap a column in (Desc col) to sort descending
+GroupBy(table (agg col) [key ...])  Aggregate a column (Sum, Mean, Max, CountAll, ...). Without keys: global aggregate; with keys: hash-aggregate
+Cumulate(table (agg col))           Running (prefix) aggregate, e.g. cumulative sum
+Pairwise(table out-col in-col lag)  Sliding-window difference: out[i] = in[i+lag] - in[i]
+Join(left right pred ...)           Hash join; (Equal lCol rCol) defines equi-join keys, other predicates become residual filters; colliding names get _l/_r suffixes; no Equal predicates degrades to O(n^2) cross-join
+LeftJoin(left right pred ...)       Left outer hash join; same predicate syntax as Join
+AntiJoin(left right pred ...)       Left anti join: rows in left with no match in right; same predicate syntax as Join
+Name(table sym)                     Store a table under a named handle for later retrieval
+ByName(sym)                         Retrieve a previously named table
+Schema(table)                       Return a one-column table listing the column names of table as symbols
+Materialize(table)                  Force materialisation of chunked Arrow arrays into a single contiguous buffer
+Slice(table offset count)           Fetch a contiguous slice of rows
+ToStatus(table)                     Evaluate a pipeline and return OK rather than materialising the result
+GetEngineDescription()              Return this operator description string
+)";
          };
 };
 

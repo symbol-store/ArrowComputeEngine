@@ -318,6 +318,13 @@
         '(Table (A 2 3))
         (boss-eval (Filter (Project (Table (A 1 2 3) (B 4 5 6)) A) (Greater A 1))))
 
+
+  ;;; GetEngineDescription
+
+  (test "GetEngineDescription: returns a string"
+        #t
+        (string? (boss-eval (GetEngineDescription))))
+
 )
 
 (test-group "TPC-H inspired"

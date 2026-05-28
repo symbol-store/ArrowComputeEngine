@@ -198,6 +198,10 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
             else if(name == "bool")
               return compute::call("cast", operands,
                                    compute::CastOptions::Unsafe(arrow::boolean()));
+            else if(name == "between")
+              return compute::call(
+                  "and", {compute::call("greater_equal", {operands[0], operands[1]}),
+                          compute::call("less_equal", {operands[0], operands[2]})});
             else
               return compute::call(name, operands);
           },
@@ -220,16 +224,55 @@ template <typename T, typename F> static void withBuilder(F&& use) {
     throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
 }
 
-static int64_t buildJoin(JoinType joinType, boss::expressions::ExpressionArguments& dynamics) {
+static boss::Expression buildJoin(JoinType joinType,
+                                  boss::expressions::ExpressionArguments& dynamics) {
   auto leftKeys = std::vector<FieldRef>(), rightKeys = std::vector<FieldRef>();
-  for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments())
-    leftKeys.push_back(get<Symbol>(it).getName());
-  for(auto& it : get<ComplexExpression>(dynamics.at(3)).getDynamicArguments())
-    rightKeys.push_back(get<Symbol>(it).getName());
-  return intermediates.put(
+  auto& left = dynamics.at(0);
+  auto& right = dynamics.at(1);
+  auto cols = intermediates.columnNames(left);
+  auto rightCols = intermediates.columnNames(right);
+  cols.insert(rightCols.begin(), rightCols.end());
+  auto filterExprs = std::vector<compute::Expression>();
+  for(auto i = 2u; i < dynamics.size(); ++i) {
+    auto const& ce = get<ComplexExpression>(dynamics.at(i));
+    if(ce.getHead().getName() == "Equal") {
+      auto const& args = ce.getDynamicArguments();
+      leftKeys.push_back(get<Symbol>(args.at(0)).getName());
+      rightKeys.push_back(get<Symbol>(args.at(1)).getName());
+    } else {
+      filterExprs.push_back(toComputeExpression(dynamics.at(i), cols));
+    }
+  }
+  compute::Expression filter =
+      filterExprs.empty() ? literal(true) : filterExprs[0];
+  for(auto i = 1u; i < filterExprs.size(); ++i)
+    filter = compute::call("and", {filter, filterExprs[i]});
+  if(leftKeys.empty()) {
+    const std::string dummyKey = "__cross_join_key__";
+    auto addDummy = [&](Declaration src, std::vector<std::string> const& fields) {
+      auto exprs = std::vector<compute::Expression>();
+      auto names = std::vector<std::string>(fields);
+      for(auto const& f : fields)
+        exprs.push_back(compute::field_ref(f));
+      exprs.push_back(compute::literal(0));
+      names.push_back(dummyKey);
+      return Declaration::Sequence({std::move(src), {"project", ProjectNodeOptions(exprs, names)}});
+    };
+    auto leftFields = intermediates.getTable(intermediates.at(left))->schema()->field_names();
+    auto rightFields = intermediates.getTable(intermediates.at(right))->schema()->field_names();
+    auto leftOutput = std::vector<FieldRef>(leftFields.begin(), leftFields.end());
+    auto rightOutput = std::vector<FieldRef>(rightFields.begin(), rightFields.end());
+    return boss::Expression{intermediates.put(
+        {"hashjoin",
+         {addDummy(intermediates.at(left), leftFields),
+          addDummy(intermediates.at(right), rightFields)},
+         HashJoinNodeOptions(joinType, {FieldRef(dummyKey)}, {FieldRef(dummyKey)},
+                             leftOutput, rightOutput, filter, "_l", "_r", true)})};
+  }
+  return boss::Expression{intermediates.put(
       {"hashjoin",
-       {intermediates.at(dynamics.at(0)), intermediates.at(dynamics.at(2))},
-       HashJoinNodeOptions(joinType, leftKeys, rightKeys, literal(true), "_l", "_r", true)});
+       {intermediates.at(left), intermediates.at(right)},
+       HashJoinNodeOptions(joinType, leftKeys, rightKeys, filter, "_l", "_r", true)})};
 }
 
 static boss::Expression evaluate(boss::Expression&& e) {

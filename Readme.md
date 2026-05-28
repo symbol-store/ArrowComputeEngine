@@ -18,9 +18,9 @@ The engine was originally developed to support a **performance engineering cours
 | `GroupBy(table (agg col) [key ...])` | Aggregate a column (`Sum`, `Mean`, `Max`, `CountAll`, …). Without keys it is a global aggregate; with keys it is a hash-aggregate |
 | `Cumulate(table (agg col))` | Running (prefix) aggregate, e.g. cumulative sum |
 | `Pairwise(table out-col in-col lag)` | Sliding-window difference: `out[i] = in[i+lag] − in[i]` |
-| `Join(left (List key ...) right (List key ...))` | Inner hash join on matching key columns; colliding column names get `_l`/`_r` suffixes |
-| `LeftJoin(left (List key ...) right (List key ...))` | Left outer hash join |
-| `AntiJoin(left (List key ...) right (List key ...))` | Left anti join — rows in `left` with no match in `right` |
+| `Join(left right pred ...)` | Hash join; one or more `(Equal lCol rCol)` predicates define equi-join keys, additional predicates (e.g. `(Between valCol loCol hiCol)`) are ANDed together as a residual filter applied after the hash lookup; colliding column names get `_l`/`_r` suffixes. **Warning:** omitting all `Equal` predicates degrades to an O(n²) cross-join. |
+| `LeftJoin(left right pred ...)` | Left outer hash join; same predicate syntax as `Join` |
+| `AntiJoin(left right pred ...)` | Left anti join — rows in `left` with no match in `right`; same predicate syntax as `Join` |
 | `Name(table sym)` | Store a table under a named handle for later retrieval |
 | `ByName(sym)` | Retrieve a previously named table |
 | `Schema(table)` | Return a one-column table `(Columns A B C …)` listing the column names of `table` as symbols |
@@ -66,6 +66,28 @@ cmake --build Build/RelWithDebInfo -j
 
 ---
 
+## Running the Tests
+
+**Unit and integration tests** (operators, TPC-H-inspired queries, full TPC-H queries):
+
+```bash
+Build/deps/bin/boss Tests/repl-tests.scm
+```
+
+**TPC-H SF10 correctness tests** — requires TPC-H data files in `TPCHData/`:
+
+```bash
+Build/deps/bin/boss Tests/tpch-sf10-correctness.scm
+```
+
+**Benchmarks** — runs the TPC-H queries and reports timing, also requires `TPCHData/`:
+
+```bash
+Build/deps/bin/boss Tests/tpch-bench.scm
+```
+
+---
+
 ## Trying It Out
 
 ### 1. Download the data
@@ -86,42 +108,42 @@ for i in {1..200}; do tail +2 owid-covid-data.csv >> /data/$USER/owid-covid-data
 ### 2. Start the BOSS REPL
 
 ```bash
-  ./Build/RelWithDebInfo/BOSS-prefix/src/BOSS-build/deps/bin/chibi-scheme -mBOSS
+Build/deps/bin/boss
 ```
+
+BOSS expressions entered at the prompt are evaluated automatically. Use `--raw` to get a plain Scheme REPL where `boss-eval` must be called explicitly.
 
 ### 3. Load the engine and data
 
-At the REPL prompt (`>`):
+At the REPL prompt:
 
 ```scheme
-(begin
-  (boss-eval (SetDefaultEnginePipeline "./Build/RelWithDebInfo/libArrowComputeEngine.so"))
-  (boss-eval (ToStatus
-    (Name
-      (Materialize
-        (OrderBy
-          (Project (Load "owid-covid-data.csv")
-            iso_code date (int date) new_cases_per_million)
-          (keys iso_code |int(date)|)))
-      sorted)))
-  (boss-eval (GroupBy (ByName sorted) (count date))))
+(SetDefaultEnginePipeline "Build/libArrowComputeEngine.so")
+(ToStatus
+  (Name
+    (Materialize
+      (OrderBy
+        (Project (Load "owid-covid-data.csv")
+          iso_code date (int date) new_cases_per_million)
+        (keys iso_code |int(date)|)))
+    sorted))
+(GroupBy (ByName sorted) (count date))
 ```
 
 ### 4. Run the hotspot query
 
 ```scheme
-(boss-eval
-  (Join
-    (GroupBy
-      (Name
-        (Pairwise
-          (Cumulate (ByName sorted) (sum new_cases_per_million))
-          smoothed_new_cases_per_million sum_new_cases_per_million 7)
-        smoothed)
-      (max smoothed_new_cases_per_million) date)
-    (keys date max_smoothed_new_cases_per_million)
-    (ByName smoothed)
-    (keys date smoothed_new_cases_per_million)))
+(Join
+  (GroupBy
+    (Name
+      (Pairwise
+        (Cumulate (ByName sorted) (sum new_cases_per_million))
+        smoothed_new_cases_per_million sum_new_cases_per_million 7)
+      smoothed)
+    (max smoothed_new_cases_per_million) date)
+  (ByName smoothed)
+  (Equal date date)
+  (Equal max_smoothed_new_cases_per_million smoothed_new_cases_per_million))
 ```
 
 This pipeline:
@@ -132,13 +154,13 @@ This pipeline:
 
 ### 5. One-liner version
 
-The same query can be run as a single shell command:
+The same query can be run as a single shell command using `-p` to evaluate BOSS expressions:
 
 ```bash
-./Build/Debug/deps/bin/chibi-scheme -mBOSS \
-  -p'(boss-eval (SetDefaultEnginePipeline "Build/Debug/libArrowComputeEngine.so"))' \
-  -p'(boss-eval (ToStatus (Name (Materialize (OrderBy (Project (Load "owid-covid-data.csv") iso_code date (int date) new_cases_per_million) (keys iso_code |int(date)|))) sorted)))' \
-  -p'(boss-eval (Join (GroupBy (Name (Pairwise (Cumulate (ByName sorted) (sum new_cases_per_million)) smoothed_new_cases_per_million sum_new_cases_per_million 7) smoothed) (max smoothed_new_cases_per_million) date) (keys date max_smoothed_new_cases_per_million) (ByName smoothed) (keys date smoothed_new_cases_per_million)))'
+Build/deps/bin/boss \\
+  -p'(SetDefaultEnginePipeline "Build/libArrowComputeEngine.so")' \\
+  -p'(ToStatus (Name (Materialize (OrderBy (Project (Load "owid-covid-data.csv") iso_code date (int date) new_cases_per_million) (keys iso_code |int(date)|))) sorted))' \\
+  -p'(Join (GroupBy (Name (Pairwise (Cumulate (ByName sorted) (sum new_cases_per_million)) smoothed_new_cases_per_million sum_new_cases_per_million 7) smoothed) (max smoothed_new_cases_per_million) date) (ByName smoothed) (Equal date date) (Equal max_smoothed_new_cases_per_million smoothed_new_cases_per_million))'
 ```
 
 ---

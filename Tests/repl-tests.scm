@@ -254,22 +254,61 @@
   (test "Join: inner — matching rows only (key columns get _l/_r suffix)"
         '(Table (id_l 1 2) (val 10 20) (id_r 1 2) (score 100 200))
         (boss-eval
-          (Join (Table (id 1 2 3) (val 10 20 30)) (keys id)
-                (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+          (Join (Table (id 1 2 3) (val 10 20 30))
+      (Table (id 1 2 4) (score 100 200 400))
+      (Equal id id))))
 
   (test "LeftJoin: keeps all left rows, NULL for unmatched right"
         '(Table (id_l 1 2 3) (val 10 20 30) (id_r 1 2 NULL) (score 100 200 NULL))
         (boss-eval
-          (LeftJoin (Table (id 1 2 3) (val 10 20 30)) (keys id)
-                    (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+          (LeftJoin (Table (id 1 2 3) (val 10 20 30))
+          (Table (id 1 2 4) (score 100 200 400))
+          (Equal id id))))
 
   (test "AntiJoin: left rows with no match in right"
         '(Table (id 3) (val 30))
         (boss-eval
-          (AntiJoin (Table (id 1 2 3) (val 10 20 30)) (keys id)
-                    (Table (id 1 2 4) (score 100 200 400)) (keys id))))
+          (AntiJoin (Table (id 1 2 3) (val 10 20 30))
+          (Table (id 1 2 4) (score 100 200 400))
+          (Equal id id))))
+
+  (test "Join: equi-join single key"
+        '(Table (id_l 1 2) (val 10 20) (id_r 1 2) (score 100 200))
+        (boss-eval
+          (Join (Table (id 1 2 3) (val 10 20 30))
+                (Table (id 1 2 4) (score 100 200 400))
+                (Equal id id))))
+
+  (test "Join: composite equi-join"
+        '(Table (a_l 1) (b_l 2) (a_r 1) (b_r 2) (c 10))
+        (boss-eval
+          (Join (Table (a 1 1) (b 2 3))
+                (Table (a 1) (b 2) (c 10))
+                (Equal a a) (Equal b b))))
+
+  (test "Join: mixed equi + Between"
+        '(Table (id_l 1) (val 5) (id_r 1) (lo 1) (hi 10))
+        (boss-eval
+          (Join (Table (id 1 2) (val 5 15))
+                (Table (id 1 1) (lo 1 11) (hi 10 20))
+                (Equal id id) (Between val lo hi))))
+
+  (test "Join: Between only — no Equal predicate (cross-join + filter)"
+        '(Table (val 5 15) (lo 1 11) (hi 10 20))
+        (boss-eval
+          (Join (Table (val 5 15))
+                (Table (lo 1 11) (hi 10 20))
+                (Between val lo hi))))
+
+  (test "AntiJoin: rows in left with no match in right"
+        '(Table (id 3) (val 30))
+        (boss-eval
+          (AntiJoin (Table (id 1 2 3) (val 10 20 30))
+                    (Table (id 1 2 4))
+                    (Equal id id))))
 
   ;;; Composition
+
 
   (test "Filter then OrderBy"
         '(Table (A 1 2 3))
@@ -308,11 +347,9 @@
         '(Table (|sum(extendedprice)| 450))
         (boss-eval
           (GroupBy
-            (Join
-              (Filter (Table (orderkey 1 2 3) (custkey 1 1 2)) (Equal custkey 1))
-              (keys orderkey)
-              (Table (orderkey 1 1 2 3) (extendedprice 100 200 150 300))
-              (keys orderkey))
+            (Join (Filter (Table (orderkey 1 2 3) (custkey 1 1 2)) (Equal custkey 1))
+      (Table (orderkey 1 1 2 3) (extendedprice 100 200 150 300))
+      (Equal orderkey orderkey))
             (Sum extendedprice))))
 
   ;; Q2-like: find the two cheapest parts using OrderBy + Slice
@@ -358,8 +395,9 @@
         (boss-eval
           (OrderBy
             (GroupBy
-              (Join (Table (o_orderkey 1 2 3) (custkey 1 1 2)) (keys o_orderkey)
-                    (Table (l_orderkey 1 1 2 3) (extendedprice 100 200 200 50)) (keys l_orderkey))
+              (Join (Table (o_orderkey 1 2 3) (custkey 1 1 2))
+      (Table (l_orderkey 1 1 2 3) (extendedprice 100 200 200 50))
+      (Equal o_orderkey l_orderkey))
               (Sum extendedprice) o_orderkey)
             (keys (Desc |sum(extendedprice)|)))))
 
@@ -380,9 +418,9 @@
         (boss-eval
           (OrderBy
             (GroupBy
-              (LeftJoin
-                (Table (custkey 1 2 3)) (keys custkey)
-                (Table (custkey 1 1 2) (orderkey 10 20 30)) (keys custkey))
+              (LeftJoin (Table (custkey 1 2 3))
+          (Table (custkey 1 1 2) (orderkey 10 20 30))
+          (Equal custkey custkey))
               (Count orderkey) custkey_l)
             (keys custkey_l))))
 
@@ -393,9 +431,9 @@
         (boss-eval
           (OrderBy
             (GroupBy
-              (AntiJoin
-                (Table (suppkey 1 2 3 3 4) (brand 1 1 1 2 2)) (keys suppkey)
-                (Table (suppkey 3)) (keys suppkey))
+              (AntiJoin (Table (suppkey 1 2 3 3 4) (brand 1 1 1 2 2))
+          (Table (suppkey 3))
+          (Equal suppkey suppkey))
               (CountAll) brand)
             (keys (Desc |count_all()|)))))
 
@@ -412,8 +450,9 @@
           (boss-eval
             (OrderBy
               (GroupBy
-                (Join (Table (orderkey 1 1 2) (custkey 1 1 2) (quantity 8 7 3)) (keys orderkey)
-                      (ByName q18_heavy) (keys orderkey))
+                (Join (Table (orderkey 1 1 2) (custkey 1 1 2) (quantity 8 7 3))
+      (ByName q18_heavy)
+      (Equal orderkey orderkey))
                 (Sum quantity) custkey)
               (keys (Desc |sum(quantity)|))))))
 
@@ -424,9 +463,9 @@
         (boss-eval
           (OrderBy
             (GroupBy
-              (AntiJoin
-                (Table (suppkey 1 2 3 4 5 6) (region 1 1 1 2 2 2)) (keys suppkey)
-                (Table (suppkey 2)) (keys suppkey))
+              (AntiJoin (Table (suppkey 1 2 3 4 5 6) (region 1 1 1 2 2 2))
+          (Table (suppkey 2))
+          (Equal suppkey suppkey))
               (CountAll) region)
             (keys (Desc |count_all()|)))))
 
@@ -440,8 +479,9 @@
           (boss-eval
             (OrderBy
               (GroupBy
-                (Join (Table (orderkey 1 2 3) (priority 1 2 2)) (keys orderkey)
-                      (ByName q4_qualifying) (keys orderkey))
+                (Join (Table (orderkey 1 2 3) (priority 1 2 2))
+      (ByName q4_qualifying)
+      (Equal orderkey orderkey))
                 (CountAll) priority)
               (keys priority)))))
 
@@ -554,8 +594,9 @@
             q20_qualifying))
           (boss-eval
             (Project
-              (Join (Table (p_partkey 1 2) (name "part1" "part2")) (keys p_partkey)
-                    (ByName q20_qualifying) (keys partkey))
+              (Join (Table (p_partkey 1 2) (name "part1" "part2"))
+      (ByName q20_qualifying)
+      (Equal p_partkey partkey))
               p_partkey))))
 
   ;; Q22: LIKE predicate — match_like forwards SQL % and _ wildcards to Arrow

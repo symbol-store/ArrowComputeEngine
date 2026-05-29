@@ -13,8 +13,8 @@
 #include <limits>
 #include <memory>
 #include <random>
-#include <sstream>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 using namespace boss::utilities::experimental;
 using namespace arrow;
@@ -77,16 +77,15 @@ static struct {
     return put({"table_source", TableSourceNodeOptions(std::move(table))});
   };
   Declaration const& at(boss::Expression const& key) {
-    return std::visit(
-        boss::utilities::overload(
-            [this](int64_t k) -> Declaration const& { return intermediates.at(k); },
-            [](auto const& v) -> Declaration const& {
-              auto ss = std::ostringstream{};
-              ss << "no intermediate found for key " << v
-                 << " (input was not produced by the arrow engine)";
-              throw std::runtime_error(ss.str());
-            }),
-        key);
+    return std::visit(boss::utilities::overload(
+                          [this](int64_t k) -> Declaration const& { return intermediates.at(k); },
+                          [](auto const& v) -> Declaration const& {
+                            auto ss = std::ostringstream {};
+                            ss << "no intermediate found for key " << v
+                               << " (input was not produced by the arrow engine)";
+                            throw std::runtime_error(ss.str());
+                          }),
+                      key);
   }
 
   boss::Expression convertResult(boss::Expression const& key) {
@@ -199,9 +198,9 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
               return compute::call("cast", operands,
                                    compute::CastOptions::Unsafe(arrow::boolean()));
             else if(name == "between")
-              return compute::call(
-                  "and", {compute::call("greater_equal", {operands[0], operands[1]}),
-                          compute::call("less_equal", {operands[0], operands[2]})});
+              return compute::call("and",
+                                   {compute::call("greater_equal", {operands[0], operands[1]}),
+                                    compute::call("less_equal", {operands[0], operands[2]})});
             else
               return compute::call(name, operands);
           },
@@ -243,8 +242,7 @@ static boss::Expression buildJoin(JoinType joinType,
       filterExprs.push_back(toComputeExpression(dynamics.at(i), cols));
     }
   }
-  compute::Expression filter =
-      filterExprs.empty() ? literal(true) : filterExprs[0];
+  compute::Expression filter = filterExprs.empty() ? literal(true) : filterExprs[0];
   for(auto i = 1u; i < filterExprs.size(); ++i)
     filter = compute::call("and", {filter, filterExprs[i]});
   if(leftKeys.empty()) {
@@ -262,14 +260,14 @@ static boss::Expression buildJoin(JoinType joinType,
     auto rightFields = intermediates.getTable(intermediates.at(right))->schema()->field_names();
     auto leftOutput = std::vector<FieldRef>(leftFields.begin(), leftFields.end());
     auto rightOutput = std::vector<FieldRef>(rightFields.begin(), rightFields.end());
-    return boss::Expression{intermediates.put(
+    return boss::Expression {intermediates.put(
         {"hashjoin",
          {addDummy(intermediates.at(left), leftFields),
           addDummy(intermediates.at(right), rightFields)},
-         HashJoinNodeOptions(joinType, {FieldRef(dummyKey)}, {FieldRef(dummyKey)},
-                             leftOutput, rightOutput, filter, "_l", "_r", true)})};
+         HashJoinNodeOptions(joinType, {FieldRef(dummyKey)}, {FieldRef(dummyKey)}, leftOutput,
+                             rightOutput, filter, "_l", "_r", true)})};
   }
-  return boss::Expression{intermediates.put(
+  return boss::Expression {intermediates.put(
       {"hashjoin",
        {intermediates.at(left), intermediates.at(right)},
        HashJoinNodeOptions(joinType, leftKeys, rightKeys, filter, "_l", "_r", true)})};
@@ -332,7 +330,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                            projections.push_back(toComputeExpression(args.at(0), columns));
                            names.push_back(get<Symbol>(args.at(1)).getName());
                          } else {
-                           auto expr = toComputeExpression(boss::Expression{std::move(s)}, columns);
+                           auto expr =
+                               toComputeExpression(boss::Expression {std::move(s)}, columns);
                            projections.push_back(expr);
                            names.push_back(expr.ToString());
                          }
@@ -370,29 +369,29 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!keys.empty()) {
              auto maybeTable = DeclarationToTable(aggDecl, false);
              if(!maybeTable.ok())
-               return boss::Expression{maybeTable.status().ToStringWithoutContextLines()};
-             return boss::Expression{intermediates.putTable(*maybeTable)};
+               return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
+             return boss::Expression {intermediates.putTable(*maybeTable)};
            }
-           return boss::Expression{intermediates.put(std::move(aggDecl))};
+           return boss::Expression {intermediates.put(std::move(aggDecl))};
          } < "Cumulate"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
            auto const aggregationAttribute =
                get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
            auto const functionName = toArrowName(aggregationFunction.getHead().getName());
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
-           auto maybeResult = compute::CallFunction(
-               "cumulative_" + functionName,
-               {input->GetColumnByName(aggregationAttribute.getName())});
+           auto maybeResult =
+               compute::CallFunction("cumulative_" + functionName,
+                                     {input->GetColumnByName(aggregationAttribute.getName())});
            if(!maybeResult.ok())
-             return boss::Expression{maybeResult.status().ToStringWithoutContextLines()};
+             return boss::Expression {maybeResult.status().ToStringWithoutContextLines()};
            auto result = maybeResult->chunked_array();
            auto maybeTable = input->AddColumn(
                input->num_columns(),
                field(functionName + "(" + aggregationAttribute.getName() + ")", result->type()),
                result);
            if(!maybeTable.ok())
-             return boss::Expression{maybeTable.status().ToStringWithoutContextLines()};
-           return boss::Expression{intermediates.putTable(*maybeTable)};
+             return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
+           return boss::Expression {intermediates.putTable(*maybeTable)};
          } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
@@ -401,32 +400,31 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(input->GetColumnByName(column)->num_chunks() != 1) {
              auto maybeCombined = input->CombineChunks();
              if(!maybeCombined.ok())
-               return boss::Expression{maybeCombined.status().ToStringWithoutContextLines()};
+               return boss::Expression {maybeCombined.status().ToStringWithoutContextLines()};
              combinedInput = *maybeCombined;
            }
            auto inputArray = combinedInput->GetColumnByName(column);
            auto maybeResult =
                compute::CallFunction("pairwise_diff", {inputArray->chunk(0)}, &options);
            if(!maybeResult.ok())
-             return boss::Expression{maybeResult.status().ToStringWithoutContextLines()};
+             return boss::Expression {maybeResult.status().ToStringWithoutContextLines()};
            auto maybeChunked = ChunkedArray::Make({maybeResult->make_array()});
            if(!maybeChunked.ok())
-             return boss::Expression{maybeChunked.status().ToStringWithoutContextLines()};
+             return boss::Expression {maybeChunked.status().ToStringWithoutContextLines()};
            auto maybeTable = input->AddColumn(
                input->num_columns(),
-               field(get<Symbol>(dynamics.at(1)).getName(), maybeResult->type()),
-               *maybeChunked);
+               field(get<Symbol>(dynamics.at(1)).getName(), maybeResult->type()), *maybeChunked);
            if(!maybeTable.ok())
-             return boss::Expression{maybeTable.status().ToStringWithoutContextLines()};
-           return boss::Expression{intermediates.putTable(*maybeTable)};
+             return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
+           return boss::Expression {intermediates.putTable(*maybeTable)};
          } < "ToStatus"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            return DeclarationToStatus(intermediates.at(dynamics.at(0)), false).CodeAsString();
          } < "Materialize"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto maybeTable =
                intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks();
            if(!maybeTable.ok())
-             return boss::Expression{maybeTable.status().ToStringWithoutContextLines()};
-           return boss::Expression{intermediates.putTable(*maybeTable)};
+             return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
+           return boss::Expression {intermediates.putTable(*maybeTable)};
          } < "Schema"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
            auto builder = arrow::StringBuilder {};
@@ -553,8 +551,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                    if(!maybeFile.ok())
                                      return maybeFile.status().ToStringWithoutContextLines();
                                    auto maybeReader = csv::TableReader::Make(
-                                       io::default_io_context(), *maybeFile,
-                                       readOptions, parseOptions, convertOptions);
+                                       io::default_io_context(), *maybeFile, readOptions,
+                                       parseOptions, convertOptions);
                                    if(!maybeReader.ok())
                                      return maybeReader.status().ToStringWithoutContextLines();
                                    auto maybeTable = (*maybeReader)->Read();

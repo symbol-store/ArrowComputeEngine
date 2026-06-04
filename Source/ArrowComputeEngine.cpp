@@ -197,6 +197,10 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
               return compute::call("match_like", {operands[0]},
                                    compute::MatchSubstringOptions {
                                        std::get<std::string>(ce.getDynamicArguments().at(1))});
+            else if(name == "match_substring")
+              return compute::call("match_substring", {operands[0]},
+                                   compute::MatchSubstringOptions {
+                                       std::get<std::string>(ce.getDynamicArguments().at(1))});
             else if(name == "bool")
               return compute::call("cast", operands,
                                    compute::CastOptions::Unsafe(arrow::boolean()));

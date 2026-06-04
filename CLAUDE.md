@@ -10,7 +10,7 @@ A BOSS engine plugin built on Apache Arrow Acero. Single-file implementation; se
 - `TPCHPlan.md` — TPC-H query coverage notes.
 
 **Two-place sync:** when operators are added, renamed, or change semantics, update *all* of:
-1. `Source/ArrowComputeEngine.cpp` — the implementation AND the `GetEngineDescription` string at the bottom of the file (this is what users see via `(GetEngineDescription)` at the REPL).
+1. `Source/ArrowComputeEngine.cpp` — the implementation, including the in-place `Description("…")` wrapping each operator's pattern. `GetEngineDescription` formats its catalog from these descriptions at runtime, so there's no separate hardcoded string to keep in sync.
 2. `OperatorCatalog.md` — the catalog entry.
 
 ## Layout

@@ -15,16 +15,19 @@
 #include <random>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 using namespace boss::utilities::experimental;
 using namespace arrow;
 using namespace acero;
 using arrow::Table;
 using arrow::acero::Declaration;
-using boss::Symbol;
-using boss::utilities::operator""_;
 using boss::ComplexExpression;
 using boss::Expression;
+using boss::Symbol;
+
+#include "EngineDocumentation.hpp"
 
 class ColumnConverter {
   boss::ExpressionArguments columnValues;
@@ -278,11 +281,17 @@ static boss::Expression evaluate(boss::Expression&& e) {
   using boss::utilities::experimental::sentinel::AnySequence_;
   static auto _ = compute::Initialize();
   return std::move(e) //
-         <"Slice"_(AnySequence_) >= Recurse(evaluate)>[](auto, auto dynamics, auto) {
+         <"Slice"_(AnySequence_) >= Description("Fetch a contiguous slice of rows")>
+             Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            return intermediates.put(Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
                 {"fetch", FetchNodeOptions(get<int>(dynamics.at(1)), get<int>(dynamics.at(2)))}}));
-         } < "OrderBy"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "OrderBy"_(AnySequence_) >=
+         Description(
+             "Sort rows by one or more columns; wrap a column in (Desc col) to sort descending") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto orderKeys = std::vector<compute::SortKey>();
            for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments()) {
              auto* sym = std::get_if<Symbol>(&it);
@@ -299,22 +308,39 @@ static boss::Expression evaluate(boss::Expression&& e) {
            return intermediates.put(
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"order_by", OrderByNodeOptions(Ordering(orderKeys))}}));
-         } < "Join"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return buildJoin(JoinType::INNER, dynamics);
-         } < "LeftJoin"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return buildJoin(JoinType::LEFT_OUTER, dynamics);
-         } < "AntiJoin"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
-           return buildJoin(JoinType::LEFT_ANTI, dynamics);
-         } < "Name"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Join"_(AnySequence_) >=
+         Description("Hash join; (Equal lCol rCol) defines equi-join keys, other predicates "
+                     "become residual filters; colliding names get _l/_r suffixes; no Equal "
+                     "predicates degrades to O(n^2) cross-join") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) { return buildJoin(JoinType::INNER, dynamics); } <
+         "LeftJoin"_(AnySequence_) >=
+         Description("Left outer hash join; same predicate syntax as Join") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) { return buildJoin(JoinType::LEFT_OUTER, dynamics); } <
+         "AntiJoin"_(AnySequence_) >= Description("Left anti join: rows in left with no match in "
+                                                  "right; same predicate syntax as Join") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) { return buildJoin(JoinType::LEFT_ANTI, dynamics); } <
+         "Name"_(AnySequence_) >=
+         Description("Store a table under a named handle for later retrieval") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
-         } < "ByName"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "ByName"_(AnySequence_) >= Description("Retrieve a previously named table") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            return intermediates.byName(get<boss::Symbol>(dynamics.at(0)));
-         } < "Filter"_(Any_, Any_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Filter"_(Any_, Any_) >=
+         Description("Keep only rows where pred holds; supports And, Or, Not and all Arrow "
+                     "comparison/compute functions") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto columns = intermediates.columnNames(dynamics.at(0));
            return intermediates.put(Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
                 {"filter", FilterNodeOptions(toComputeExpression(dynamics.at(1), columns))}}));
-         } < "Project"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Project"_(AnySequence_) >=
+         Description("Select and rename columns; supports (As expr newName) aliasing, (As (Int "
+                     "col) newName)/(As (Bool col) newName) for type casts, and arbitrary Arrow "
+                     "compute functions in the expression") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto columns = intermediates.columnNames(dynamics.at(0));
            auto projections = std::vector<compute::Expression>();
            auto names = std::vector<std::string>();
@@ -341,7 +367,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
            return intermediates.put(
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"project", ProjectNodeOptions(projections, names)}}));
-         } < "GroupBy"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "GroupBy"_(AnySequence_) >=
+         Description("Aggregate a column (Sum, Mean, Max, CountAll, ...). Without keys: global "
+                     "aggregate; with keys: hash-aggregate") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto aggregates = std::vector<compute::Aggregate>();
            auto keys = std::vector<FieldRef>();
            auto i = 1u;
@@ -373,7 +402,9 @@ static boss::Expression evaluate(boss::Expression&& e) {
              return boss::Expression {intermediates.putTable(*maybeTable)};
            }
            return boss::Expression {intermediates.put(std::move(aggDecl))};
-         } < "Cumulate"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Cumulate"_(AnySequence_) >=
+         Description("Running (prefix) aggregate, e.g. cumulative sum") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
            auto const aggregationAttribute =
                get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
@@ -392,7 +423,9 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
-         } < "Pairwise"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Pairwise"_(AnySequence_) >=
+         Description("Sliding-window difference: out[i] = in[i+lag] - in[i]") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
            auto column = get<Symbol>(dynamics.at(2)).getName();
@@ -417,15 +450,25 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
-         } < "ToStatus"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "ToStatus"_(AnySequence_) >=
+         Description("Evaluate a pipeline and return OK rather than materialising the result") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            return DeclarationToStatus(intermediates.at(dynamics.at(0)), false).CodeAsString();
-         } < "Materialize"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Materialize"_(AnySequence_) >=
+         Description(
+             "Force materialisation of chunked Arrow arrays into a single contiguous buffer") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto maybeTable =
                intermediates.getTable(intermediates.at(dynamics.at(0)))->CombineChunks();
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
-         } < "Schema"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Schema"_(AnySequence_) >=
+         Description("Return a one-column table listing the column names of table as symbols") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
            auto builder = arrow::StringBuilder {};
            for(auto i = 0; i < input->num_columns(); i++)
@@ -434,7 +477,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
                arrow::schema({arrow::field("Columns", arrow::utf8(), true,
                                            arrow::key_value_metadata({"boss_type"}, {"symbol"}))}),
                {*builder.Finish()}));
-         } < "Table"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Table"_(AnySequence_) >=
+         Description("Construct an in-memory table from literal column "
+                     "data; symbol values are stored as named nulls") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            auto fields = std::vector<std::shared_ptr<arrow::Field>>();
            auto arrays = std::vector<std::shared_ptr<arrow::Array>>();
            for(auto& columnExpr : dynamics) {
@@ -525,7 +571,9 @@ static boss::Expression evaluate(boss::Expression&& e) {
              }
            }
            return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));
-         } < "Load"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto dynamics, auto) {
+         } < "Load"_(AnySequence_) >= Description("Read a CSV file into an in-memory Arrow table") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
            return std::visit(boss::utilities::overload(
                                  [&dynamics](std::string&& path) -> boss::Expression {
                                    std::vector<std::string> columnNames;
@@ -562,27 +610,22 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                  },
                                  [](auto&& e) -> boss::Expression { return e; }),
                              std::move(dynamics.at(0)));
-         } < "GetEngineDescription"_(AnySequence_) >= Recurse(evaluate) > [](auto, auto, auto) {
-           return R"(
-Load(path)                          Read a CSV file into an in-memory Arrow table
-Table((col val ...) ...)            Construct an in-memory table from literal column data; symbol values are stored as named nulls
-Filter(table pred)                  Keep only rows where pred holds; supports And, Or, Not and all Arrow comparison/compute functions
-Project(table col ...)              Select and rename columns; supports (As expr name) aliasing, (Int col)/(Bool col) for type casts, and arbitrary Arrow compute functions
-OrderBy(table (List col ...))       Sort rows by one or more columns; wrap a column in (Desc col) to sort descending
-GroupBy(table (agg col) [key ...])  Aggregate a column (Sum, Mean, Max, CountAll, ...). Without keys: global aggregate; with keys: hash-aggregate
-Cumulate(table (agg col))           Running (prefix) aggregate, e.g. cumulative sum
-Pairwise(table out-col in-col lag)  Sliding-window difference: out[i] = in[i+lag] - in[i]
-Join(left right pred ...)           Hash join; (Equal lCol rCol) defines equi-join keys, other predicates become residual filters; colliding names get _l/_r suffixes; no Equal predicates degrades to O(n^2) cross-join
-LeftJoin(left right pred ...)       Left outer hash join; same predicate syntax as Join
-AntiJoin(left right pred ...)       Left anti join: rows in left with no match in right; same predicate syntax as Join
-Name(table sym)                     Store a table under a named handle for later retrieval
-ByName(sym)                         Retrieve a previously named table
-Schema(table)                       Return a one-column table listing the column names of table as symbols
-Materialize(table)                  Force materialisation of chunked Arrow arrays into a single contiguous buffer
-Slice(table offset count)           Fetch a contiguous slice of rows
-ToStatus(table)                     Evaluate a pipeline and return OK rather than materialising the result
-GetEngineDescription()              Return this operator description string
-)";
+         } < "GetEngineDescription"_(AnySequence_) >=
+         Description("Return this operator description string") > Recurse(evaluate) >
+         [](auto, auto, auto) {
+           size_t maxWidth = 0;
+           for(auto const& entry : operatorDescriptions()) {
+             auto width = entry.head.size() + entry.signature.size() + 2;
+             if(width > maxWidth)
+               maxWidth = width;
+           }
+           std::string output = "\n";
+           for(auto const& entry : operatorDescriptions()) {
+             std::string signature = entry.head + "(" + entry.signature + ")";
+             output +=
+                 signature + std::string(maxWidth + 2 - signature.size(), ' ') + entry.text + "\n";
+           }
+           return output;
          };
 };
 

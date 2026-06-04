@@ -156,6 +156,39 @@ static std::string toArrowName(std::string name) {
   return it != aliases.end() ? it->second : name;
 }
 
+// Predicate, cast, and value functions accepted inside Filter / Project / Join
+// expressions. The catalog is shown by `(GetEngineDescription)`. Keep in sync
+// with the special-case branches in `toComputeExpression` below.
+struct ExpressionFunctionDescription {
+  std::string_view signature;
+  std::string_view text;
+};
+static std::vector<ExpressionFunctionDescription> const& expressionFunctions() {
+  static std::vector<ExpressionFunctionDescription> const functions = {
+      {"Equal(col val)", "Equality; YYYY-MM-DD literals auto-cast to date32 against date columns"},
+      {"NotEqual(col val)", "Inequality (with the same date auto-cast)"},
+      {"Less(col val)", "Less-than (with date auto-cast)"},
+      {"LessEqual(col val)", "Less-or-equal (with date auto-cast)"},
+      {"Greater(col val)", "Greater-than (with date auto-cast)"},
+      {"GreaterEqual(col val)", "Greater-or-equal (with date auto-cast)"},
+      {"And(pred ...)", "Logical conjunction over any number of predicates"},
+      {"Or(pred ...)", "Logical disjunction"},
+      {"Not(pred)", "Logical negation (Arrow's invert)"},
+      {"Like(col pattern)", "SQL LIKE; % matches any sequence, _ matches a single character"},
+      {"Match_Substring(col str)", "Substring match (case-sensitive)"},
+      {"Between(col low high)", "Inclusive range: low <= col <= high"},
+      {"IfElse(cond then else)", "Conditional expression"},
+      {"IsValid(col)", "True where col is non-null"},
+      {"Int(expr)", "Cast expression to int32"},
+      {"Bool(expr)", "Cast expression to boolean"},
+      {"Date(expr)", "Cast expression to date32"},
+      {"Timestamp(expr)", "Cast expression to UTC second-resolution timestamp"},
+      {"<any other name>(args ...)",
+       "Any Arrow compute function: name is lowercased and dispatched directly"},
+  };
+  return functions;
+}
+
 static compute::Expression toComputeExpression(boss::Expression const& e,
                                                std::set<std::string> const& columns = {}) {
   return std::visit(
@@ -617,17 +650,29 @@ static boss::Expression evaluate(boss::Expression&& e) {
          } < "GetEngineDescription"_(AnySequence_) >=
          Description("Return this operator description string") > Recurse(evaluate) >
          [](auto, auto, auto) {
+           auto const& operators = operatorDescriptions();
+           auto const& functions = expressionFunctions();
            size_t maxWidth = 0;
-           for(auto const& entry : operatorDescriptions()) {
+           for(auto const& entry : operators) {
              auto width = entry.head.size() + entry.signature.size() + 2;
              if(width > maxWidth)
                maxWidth = width;
            }
-           std::string output = "\n";
-           for(auto const& entry : operatorDescriptions()) {
+           for(auto const& entry : functions) {
+             if(entry.signature.size() > maxWidth)
+               maxWidth = entry.signature.size();
+           }
+           std::string output = "\nOperators:\n";
+           for(auto const& entry : operators) {
              std::string signature = entry.head + "(" + entry.signature + ")";
-             output +=
-                 signature + std::string(maxWidth + 2 - signature.size(), ' ') + entry.text + "\n";
+             output += "  " + signature + std::string(maxWidth + 2 - signature.size(), ' ') +
+                       entry.text + "\n";
+           }
+           output += "\nExpression functions (used inside Filter / Project / Join predicates):\n";
+           for(auto const& entry : functions) {
+             output += "  " + std::string(entry.signature) +
+                       std::string(maxWidth + 2 - entry.signature.size(), ' ') +
+                       std::string(entry.text) + "\n";
            }
            return output;
          };

@@ -171,9 +171,11 @@ static std::vector<ExpressionFunctionDescription> const& expressionFunctions() {
       {"LessEqual(col val)", "Less-or-equal (with date auto-cast)"},
       {"Greater(col val)", "Greater-than (with date auto-cast)"},
       {"GreaterEqual(col val)", "Greater-or-equal (with date auto-cast)"},
-      {"And(pred ...)", "Logical conjunction over any number of predicates"},
-      {"Or(pred ...)", "Logical disjunction"},
+      {"And(pred ...)", "Logical conjunction; n-ary, folded left into binary Arrow calls"},
+      {"Or(pred ...)", "Logical disjunction; n-ary, folded left"},
       {"Not(pred)", "Logical negation (Arrow's invert)"},
+      {"Add(val ...)", "Arithmetic sum; n-ary, folded left"},
+      {"Multiply(val ...)", "Arithmetic product; n-ary, folded left"},
       {"Like(col pattern)", "SQL LIKE; % matches any sequence, _ matches a single character"},
       {"Match_Substring(col str)", "Substring match (case-sensitive)"},
       {"Between(col low high)", "Inclusive range: low <= col <= high"},
@@ -241,7 +243,15 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
               return compute::call("and",
                                    {compute::call("greater_equal", {operands[0], operands[1]}),
                                     compute::call("less_equal", {operands[0], operands[2]})});
-            else
+            // Arrow's and/or/add/multiply are strictly binary. Fold left so users
+            // can write (And a b c) or (Add x y z) without hand-nesting.
+            else if(operands.size() > 2 &&
+                    (name == "and" || name == "or" || name == "add" || name == "multiply")) {
+              auto result = compute::call(name, {operands[0], operands[1]});
+              for(size_t i = 2; i < operands.size(); ++i)
+                result = compute::call(name, {std::move(result), operands[i]});
+              return result;
+            } else
               return compute::call(name, operands);
           },
           [](auto v) { return compute::literal(v); }),

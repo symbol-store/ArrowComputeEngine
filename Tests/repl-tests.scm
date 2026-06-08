@@ -307,6 +307,36 @@
                     (Table (id 1 2 4))
                     (Equal id id))))
 
+  ;;; Union
+
+  (test "Union: two single-column tables concatenate (bag semantics)"
+        '(Table (A 1 2 3 4 5))
+        (boss-eval (Union (Table (A 1 2 3)) (Table (A 4 5)))))
+
+  (test "Union: duplicates are kept (UNION ALL, not set union)"
+        '(Table (A 1 2 1 2))
+        (boss-eval (Union (Table (A 1 2)) (Table (A 1 2)))))
+
+  (test "Union: multi-column tables"
+        '(Table (A 1 2 3) (B 10 20 30))
+        (boss-eval (Union (Table (A 1 2) (B 10 20)) (Table (A 3) (B 30)))))
+
+  (test "Union: three inputs (n-ary)"
+        '(Table (A 1 2 3 4 5 6))
+        (boss-eval (Union (Table (A 1 2)) (Table (A 3 4)) (Table (A 5 6)))))
+
+  (test "Union: composes with Filter and OrderBy"
+        '(Table (A 1 2 3 4))
+        (boss-eval
+          (OrderBy
+            (Union (Filter (Table (A 1 2 3 4)) (Less A 3))
+                   (Filter (Table (A 1 2 3 4)) (Greater A 2)))
+            (keys A))))
+
+  (test "Union: empty input on one side"
+        '(Table (A 1 2))
+        (boss-eval (Union (Table (A 1 2)) (Filter (Table (A 9)) (Less A 0)))))
+
   ;;; Composition
 
 

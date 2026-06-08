@@ -209,6 +209,21 @@ Left anti join. Returns left rows with *no* match in right.
 
 ---
 
+## Set operations
+
+### `Union(table table …)`
+
+Concatenates two or more tables (bag union — duplicates are preserved, matching SQL `UNION ALL`). All inputs must share the same schema (column names and types). Rows appear in input order: `(Union a b c)` yields a's rows, then b's, then c's. For set-style union without duplicates, follow with `GroupBy` on all columns.
+
+**Example:**
+
+```scheme
+(Union (Filter orders (Equal region "US"))
+       (Filter orders (Equal region "EU")))
+```
+
+---
+
 ## Named bindings (DAG-shaped plans)
 
 ### `Name(table sym)`

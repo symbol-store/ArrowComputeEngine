@@ -4,6 +4,7 @@
 #include <Utilities.hpp>
 #include <algorithm>
 #include <arrow/api.h>
+#include <filesystem>
 
 #include <arrow/acero/api.h>
 #include <arrow/compute/api.h>
@@ -379,8 +380,7 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
-         } <
-         "Name"_(AnySequence_) >=
+         } < "Name"_(AnySequence_) >=
          Description("Store a table under a named handle for later retrieval") > Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
@@ -631,45 +631,99 @@ static boss::Expression evaluate(boss::Expression&& e) {
              }
            }
            return intermediates.putTable(arrow::Table::Make(arrow::schema(fields), arrays));
-         } < "Load"_(AnySequence_) >= Description("Read a CSV file into an in-memory Arrow table") >
-         Recurse(evaluate) >
+         } < "Load"_(AnySequence_) >=
+         Description("Read a CSV file, or every .csv/.tbl in a directory unioned "
+                     "with a 'file name' column") > Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           return std::visit(boss::utilities::overload(
-                                 [&dynamics](std::string&& path) -> boss::Expression {
-                                   std::vector<std::string> columnNames;
-                                   for(auto i = 1u; i < dynamics.size(); ++i)
-                                     columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
-                                   auto readOptions = csv::ReadOptions::Defaults();
-                                   auto parseOptions = csv::ParseOptions::Defaults();
-                                   auto convertOptions = csv::ConvertOptions::Defaults();
-                                   readOptions.use_threads = false;
-                                   readOptions.block_size = 1 << 26;
-                                   bool isTbl =
-                                       path.size() > 4 && path.substr(path.size() - 4) == ".tbl";
-                                   if(isTbl)
-                                     parseOptions.delimiter = '|';
-                                   if(!columnNames.empty()) {
-                                     auto withTrailing = columnNames;
-                                     if(isTbl)
-                                       withTrailing.push_back("_trailing");
-                                     readOptions.column_names = withTrailing;
-                                     convertOptions.include_columns = columnNames;
-                                   }
-                                   auto maybeFile = io::ReadableFile::Open(path);
-                                   if(!maybeFile.ok())
-                                     return maybeFile.status().ToStringWithoutContextLines();
-                                   auto maybeReader = csv::TableReader::Make(
-                                       io::default_io_context(), *maybeFile, readOptions,
-                                       parseOptions, convertOptions);
-                                   if(!maybeReader.ok())
-                                     return maybeReader.status().ToStringWithoutContextLines();
-                                   auto maybeTable = (*maybeReader)->Read();
-                                   if(!maybeTable.ok())
-                                     return maybeTable.status().ToStringWithoutContextLines();
-                                   return intermediates.putTable(*(*maybeTable)->CombineChunks());
-                                 },
-                                 [](auto&& e) -> boss::Expression { return e; }),
-                             std::move(dynamics.at(0)));
+           return std::visit(
+               boss::utilities::overload(
+                   [&dynamics](std::string&& path) -> boss::Expression {
+                     std::vector<std::string> columnNames;
+                     for(auto i = 1u; i < dynamics.size(); ++i)
+                       columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
+
+                     auto loadOne = [&](std::string const& filePath)
+                         -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                       auto readOptions = csv::ReadOptions::Defaults();
+                       auto parseOptions = csv::ParseOptions::Defaults();
+                       auto convertOptions = csv::ConvertOptions::Defaults();
+                       readOptions.use_threads = false;
+                       readOptions.block_size = 1 << 26;
+                       bool isTbl = filePath.ends_with(".tbl");
+                       if(isTbl)
+                         parseOptions.delimiter = '|';
+                       if(!columnNames.empty()) {
+                         auto withTrailing = columnNames;
+                         if(isTbl)
+                           withTrailing.push_back("_trailing");
+                         readOptions.column_names = withTrailing;
+                         convertOptions.include_columns = columnNames;
+                       }
+                       ARROW_ASSIGN_OR_RAISE(auto file, io::ReadableFile::Open(filePath));
+                       ARROW_ASSIGN_OR_RAISE(auto reader,
+                                             csv::TableReader::Make(io::default_io_context(), file,
+                                                                    readOptions, parseOptions,
+                                                                    convertOptions));
+                       return reader->Read();
+                     };
+
+                     namespace fs = std::filesystem;
+                     std::error_code errorCode;
+                     bool isDirectory = fs::is_directory(path, errorCode);
+                     if(errorCode)
+                       return std::string("cannot stat ") + path + ": " + errorCode.message();
+
+                     auto build = [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                       if(!isDirectory) {
+                         ARROW_ASSIGN_OR_RAISE(auto table, loadOne(path));
+                         return table->CombineChunks();
+                       }
+
+                       std::vector<std::string> filePaths;
+                       for(auto const& entry : fs::directory_iterator(path)) {
+                         if(!entry.is_regular_file())
+                           continue;
+                         auto extension = entry.path().extension().string();
+                         if(extension == ".csv" || extension == ".tbl")
+                           filePaths.push_back(entry.path().string());
+                       }
+                       if(filePaths.empty())
+                         return arrow::Table::MakeEmpty(arrow::schema({}));
+
+                       auto fileNameField =
+                           arrow::field("file name", arrow::utf8(), true,
+                                        arrow::key_value_metadata({"boss_type"}, {"symbol"}));
+
+                       std::vector<std::shared_ptr<arrow::Table>> tables;
+                       tables.reserve(filePaths.size());
+                       for(auto const& filePath : filePaths) {
+                         ARROW_ASSIGN_OR_RAISE(auto table, loadOne(filePath));
+                         auto baseName = fs::path(filePath).filename().string();
+                         ARROW_ASSIGN_OR_RAISE(
+                             auto fileNameArray,
+                             arrow::MakeArrayFromScalar(arrow::StringScalar(baseName),
+                                                        table->num_rows()));
+                         ARROW_ASSIGN_OR_RAISE(
+                             table, table->AddColumn(
+                                        table->num_columns(), fileNameField,
+                                        std::make_shared<arrow::ChunkedArray>(fileNameArray)));
+                         tables.push_back(table);
+                       }
+
+                       arrow::ConcatenateTablesOptions concatOptions;
+                       concatOptions.unify_schemas = true;
+                       ARROW_ASSIGN_OR_RAISE(auto concatenated,
+                                             arrow::ConcatenateTables(tables, concatOptions));
+                       return concatenated->CombineChunks();
+                     };
+
+                     auto maybeTable = build();
+                     if(!maybeTable.ok())
+                       return maybeTable.status().ToStringWithoutContextLines();
+                     return intermediates.putTable(*maybeTable);
+                   },
+                   [](auto&& e) -> boss::Expression { return e; }),
+               std::move(dynamics.at(0)));
          } < "GetEngineDescription"_(AnySequence_) >=
          Description("Return this operator description string") > Recurse(evaluate) >
          [](auto, auto, auto) {

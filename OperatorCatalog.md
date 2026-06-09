@@ -31,11 +31,19 @@ Reads a CSV file from `path` into an in-memory table.
 - An optional list of column-name symbols restricts the load to those columns: `(Load "file.csv" id name email)`.
 - Returns a handle into the engine's registry.
 
+**Directory mode.** If `path` is a directory, every `.csv` and `.tbl` file at the top level is loaded and unioned:
+
+- The result schema is the union of all per-file schemas; columns absent in a given file are filled with nulls (which surface as `NULL` symbols when materialized).
+- A `"file name"` column of `boss_type=symbol` is appended to every row with the basename of the file it came from (extension included).
+- Optional column-name arguments are applied to every file (same `include_columns` list per CSV).
+- A directory with no `.csv`/`.tbl` files produces an empty table.
+
 **Example:**
 
 ```scheme
 (Load "owid-covid-data.csv")
 (Load "lineitem.tbl" l_orderkey l_partkey l_quantity)
+(Load "TPCHData/")  ; loads every .csv/.tbl in the directory, tagged by file name
 ```
 
 ### `Table((col v1 v2 …) …)`

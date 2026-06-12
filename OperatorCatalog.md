@@ -221,7 +221,7 @@ Left anti join. Returns left rows with *no* match in right.
 
 ### `Union(table table …)`
 
-Concatenates two or more tables (bag union — duplicates are preserved, matching SQL `UNION ALL`). All inputs must share the same schema (column names and types). Rows appear in input order: `(Union a b c)` yields a's rows, then b's, then c's. For set-style union without duplicates, follow with `GroupBy` on all columns.
+Concatenates two or more tables (bag union — duplicates are preserved, matching SQL `UNION ALL`). Schemas are unified across inputs: columns absent from a given input are filled with nulls (which surface as `NULL` symbols when materialized). Rows appear in input order: `(Union a b c)` yields a's rows, then b's, then c's. For set-style union without duplicates, follow with `GroupBy` on all columns.
 
 **Example:**
 

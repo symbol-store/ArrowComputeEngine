@@ -369,14 +369,17 @@ static boss::Expression evaluate(boss::Expression&& e) {
          Recurse(evaluate) >
          [](auto, auto dynamics, auto) { return buildJoin(JoinType::LEFT_ANTI, dynamics); } <
          "Union"_(AnySequence_) >=
-         Description("Concatenate two or more tables (bag union, like SQL UNION ALL); all "
-                     "inputs must share the same schema (column names and types); rows "
-                     "appear in input order") > Recurse(evaluate) >
+         Description("Concatenate two or more tables (bag union, like SQL UNION ALL); "
+                     "schemas are unified across inputs, with columns absent from a "
+                     "given input filled with nulls; rows appear in input order") >
+         Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            auto tables = std::vector<std::shared_ptr<arrow::Table>>();
            for(auto& key : dynamics)
              tables.push_back(intermediates.getTable(intermediates.at(key)));
-           auto maybeTable = arrow::ConcatenateTables(tables);
+           arrow::ConcatenateTablesOptions concatOptions;
+           concatOptions.unify_schemas = true;
+           auto maybeTable = arrow::ConcatenateTables(tables, concatOptions);
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};

@@ -697,6 +697,17 @@ static boss::Expression evaluate(boss::Expression&& e) {
                      if(errorCode)
                        return std::string("cannot stat ") + path + ": " + errorCode.message();
 
+                     if(!isDirectory) {
+                       auto extension = fs::path(path).extension().string();
+                       if(extension != ".csv" && extension != ".tbl") {
+                         boss::ExpressionArguments unchanged;
+                         unchanged.push_back(std::move(path));
+                         for(auto i = 1u; i < dynamics.size(); ++i)
+                           unchanged.push_back(std::move(dynamics.at(i)));
+                         return ComplexExpression("Load"_, {}, std::move(unchanged));
+                       }
+                     }
+
                      auto build = [&]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
                        if(!isDirectory) {
                          ARROW_ASSIGN_OR_RAISE(auto table, loadOne(path));

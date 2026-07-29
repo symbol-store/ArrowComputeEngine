@@ -67,6 +67,12 @@ private:
         lastPatternArgNames.emplace_back("AnySequence_");
       } else if(argument == boss::utilities::experimental::sentinel::Any_) {
         lastPatternArgNames.emplace_back("Any_");
+      } else if(argument == boss::utilities::experimental::sentinel::String_) {
+        lastPatternArgNames.emplace_back("String_");
+      } else if(argument == boss::utilities::experimental::sentinel::Symbol_) {
+        lastPatternArgNames.emplace_back("Symbol_");
+      } else if(argument == boss::utilities::experimental::sentinel::Integer_) {
+        lastPatternArgNames.emplace_back("Integer_");
       } else {
         lastPatternArgNames.emplace_back(argument.getName());
       }
@@ -105,18 +111,18 @@ struct Description {
     if(lastPatternHead.empty()) {
       return;
     }
-    auto& registry = operatorDescriptions();
-    if(std::find_if(registry.begin(), registry.end(), [](auto const& entry) {
-         return entry.head == lastPatternHead;
-       }) != registry.end()) {
-      return;
-    }
     std::string signature;
     for(size_t i = 0; i < lastPatternArgNames.size(); ++i) {
       if(i > 0) {
         signature += ", ";
       }
       signature += lastPatternArgNames[i];
+    }
+    auto& registry = operatorDescriptions();
+    if(std::find_if(registry.begin(), registry.end(), [&signature](auto const& entry) {
+         return entry.head == lastPatternHead && entry.signature == signature;
+       }) != registry.end()) {
+      return;
     }
     registry.push_back({lastPatternHead, std::move(signature), text});
   }

@@ -73,12 +73,19 @@ endif(MSVC)
 target_include_directories(ArrowComputeEngine SYSTEM PUBLIC ${ArrowComputeEngine_BINARY_DIR}/deps/include)
 add_dependencies(ArrowComputeEngine BOSS)
 add_dependencies(ArrowComputeEngine Arrow)
-target_link_libraries(ArrowComputeEngine PUBLIC
+set(ArrowComputeEngine_ARROW_ARCHIVES
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow.a
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_compute.a
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_acero.a
-  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_bundled_dependencies.a
-)
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_bundled_dependencies.a)
+list(JOIN ArrowComputeEngine_ARROW_ARCHIVES "," ArrowComputeEngine_ARROW_GROUP)
+
+if(APPLE)
+  target_link_libraries(ArrowComputeEngine PUBLIC ${ArrowComputeEngine_ARROW_ARCHIVES})
+else()
+  target_link_libraries(ArrowComputeEngine PUBLIC
+    "$<LINK_GROUP:RESCAN,${ArrowComputeEngine_ARROW_GROUP}>")
+endif()
 
 
 

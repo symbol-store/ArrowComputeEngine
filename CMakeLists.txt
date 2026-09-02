@@ -46,7 +46,7 @@ ExternalProject_Add(Arrow
   DOWNLOAD_EXTRACT_TIMESTAMP NEW
   DOWNLOAD_DIR $ENV{HOME}/.cmake-downloads/${CMAKE_PROJECT_NAME}
   SOURCE_SUBDIR cpp
-  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${ArrowComputeEngine_BINARY_DIR}/deps $<IF:$<CONFIG:>,,-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}> -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_FILESYSTEM=ON -DARROW_ACERO=ON -DARROW_BUILD_STATIC=ON -DARROW_BUILD_SHARED=OFF -DARROW_JEMALLOC=OFF -DARROW_IPC=OFF -Dutf8proc_SOURCE=BUNDLED -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER} -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
+  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${ArrowComputeEngine_BINARY_DIR}/deps $<IF:$<CONFIG:>,,-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}> -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}  -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} -DARROW_COMPUTE=ON -DARROW_CSV=ON -DARROW_FILESYSTEM=ON -DARROW_ACERO=ON -DARROW_BUILD_STATIC=ON -DARROW_BUILD_SHARED=OFF -DARROW_JEMALLOC=OFF -DARROW_IPC=OFF -Dutf8proc_SOURCE=BUNDLED -Dxsimd_SOURCE=BUNDLED -Dre2_SOURCE=BUNDLED -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER} -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}
   BUILD_BYPRODUCTS
     ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow.a
     ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_compute.a
@@ -73,12 +73,19 @@ endif(MSVC)
 target_include_directories(ArrowComputeEngine SYSTEM PUBLIC ${ArrowComputeEngine_BINARY_DIR}/deps/include)
 add_dependencies(ArrowComputeEngine BOSS)
 add_dependencies(ArrowComputeEngine Arrow)
-target_link_libraries(ArrowComputeEngine PUBLIC
+set(ArrowComputeEngine_ARROW_ARCHIVES
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow.a
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_compute.a
   ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_acero.a
-  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_bundled_dependencies.a
-)
+  ${ArrowComputeEngine_BINARY_DIR}/deps/lib/libarrow_bundled_dependencies.a)
+list(JOIN ArrowComputeEngine_ARROW_ARCHIVES "," ArrowComputeEngine_ARROW_GROUP)
+
+if(APPLE)
+  target_link_libraries(ArrowComputeEngine PUBLIC ${ArrowComputeEngine_ARROW_ARCHIVES})
+else()
+  target_link_libraries(ArrowComputeEngine PUBLIC
+    "$<LINK_GROUP:RESCAN,${ArrowComputeEngine_ARROW_GROUP}>")
+endif()
 
 
 

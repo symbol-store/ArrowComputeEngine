@@ -181,24 +181,34 @@ Appends a column `out-col` whose value at row `i` is `in-col[i] − in-col[i −
 (Pairwise (Cumulate sales (Sum revenue)) smoothed_revenue |sum(revenue)| 7)
 ```
 
-### `Window(table (agg col) … size [Partial])`
+### `Window(table (agg col) … size [Partial] [(OrderBy col)])`
 
-Appends one column per aggregate, holding the aggregate of each row and the `size − 1` rows before it. Supported aggregates are `Sum`, `Mean`, `Min`, `Max` and `Count`; nulls are ignored. The first `size − 1` rows are `NULL`; with `Partial`, they aggregate the rows available instead. Output columns are named `fn(col)`.
+Appends one column per aggregate, holding the aggregate of each row and the `size − 1` rows before it. Supported aggregates are `Sum`, `Mean`, `Min`, `Max` and `Count`; nulls are ignored. The first `size − 1` rows are `NULL`; with `Partial`, they aggregate the rows available instead. Rows are taken in input order, or sorted by the column given in `(OrderBy col)`. Output columns are named `fn(col)`.
 
 **Example:**
 
 ```scheme
-(Window readings (Mean power) 30)    ; appends |mean(power)|, the mean of the last 30 rows
+(Window readings (Mean power) 30 (OrderBy timestamp))    ; appends |mean(power)|
 ```
 
-### `ExponentialMovingAverage(table col (Alpha a))` / `ExponentialMovingAverage(table col (Span n))`
+### `ExponentialMovingAverage(table [out-col] col (Alpha a))` / `ExponentialMovingAverage(table [out-col] col (Span n))`
 
-Appends a column containing the exponentially weighted moving average of the named column. Starting from 0, each row moves the average towards its value by the fraction `a`; null rows keep the previous average. `(Span n)` sets `a` to `2/(n+1)`. Output column is named `exponential_moving_average(col)`.
+Appends a column containing the exponentially weighted moving average of the named column. Starting from 0, each row moves the average towards its value by the fraction `a`; null rows keep the previous average. `(Span n)` sets `a` to `2/(n+1)`. `a` and `n` may be any expression without columns, such as `(Divide 1 42)` or a named one-row, one-column table. The output column is named `out-col`, or `exponential_moving_average(col)` if none is given.
 
 **Example:**
 
 ```scheme
-(ExponentialMovingAverage daily load (Alpha 0.1))
+(ExponentialMovingAverage daily fitness load (Alpha (Divide 1 42)))
+```
+
+### `KernelDensityEstimate(table col (Grid start stop step) (Bandwidth h))`
+
+Returns the Gaussian kernel density of the named column at each point from `start` to `stop` in steps of `step`, as columns `x` and `density`. `h` is the bandwidth, or `Silverman` to derive it from the data (1.06 × standard deviation × count^−1/5). Nulls are ignored.
+
+**Example:**
+
+```scheme
+(KernelDensityEstimate readings heart_rate (Grid 50 175 0.5) (Bandwidth Silverman))
 ```
 
 ### `Resample(table key (agg col) … step [(Fill v)])`
@@ -385,9 +395,10 @@ These are not standalone operators but appear inside `Filter` predicates and `Pr
 | `Hour`, `Minute`, `Second` | same                  | time-of-day extractors on `timestamp[s, UTC]` |
 | `DayOfWeek`              | `day_of_week`           | Monday = 0                                 |
 | `Round`                  | `round`                 | `(Round x ndigits mode)`: round to `ndigits` decimal places (default 0); mode is `HalfToEven` (default), `HalfUp`, `HalfDown`, `Down`, `Up`, `TowardsZero`, `TowardsInfinity`, `HalfTowardsZero`, `HalfTowardsInfinity` or `HalfToOdd` |
-| `Strftime`               | `strftime`              | `(Strftime ts format)`: format a timestamp as a string, e.g. `"%d %b %Y"` |
+| `Strftime`               | `strftime`              | `(Strftime ts format)`: format a timestamp as a string, e.g. `"%d %b %Y"`; `%-d`, `%-H`, … drop the leading zero |
+| `Utf8_Trim`, `Utf8_LTrim`, `Utf8_RTrim` | `utf8_trim`, `utf8_ltrim`, `utf8_rtrim` | `(Utf8_LTrim s "0")`: remove the given characters from both ends, the start or the end |
 
-`Round` and `Strftime` take their settings after the operand, either in order (`(Round x 2 Down)`) or by name (`(Round x (Options (ndigits 2) (round_mode Down)))`).
+`Round`, `Strftime` and the trim functions take their settings after the operand, either in order (`(Round x 2 Down)`) or by name (`(Round x (Options (ndigits 2) (round_mode Down)))`).
 
 Aggregator heads inside `GroupBy` / `Cumulate`:
 

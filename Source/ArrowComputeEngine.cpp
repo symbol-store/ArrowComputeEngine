@@ -18,6 +18,7 @@
 #include <optional>
 #include <random>
 #include <ranges>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -220,7 +221,11 @@ static std::vector<ExpressionFunctionDescription> const& expressionFunctions() {
       {"Round(x [ndigits] [mode])",
        "Round to ndigits decimal places (default 0) using the rounding mode (default "
        "HalfToEven)"},
-      {"Strftime(ts format)", "Format a timestamp as a string, e.g. \"%d %b %Y\""},
+      {"Strftime(ts format)",
+       "Format a timestamp as a string, e.g. \"%d %b %Y\"; \"%-d\", \"%-H\", ... drop the "
+       "leading zero"},
+      {"Utf8_Trim(str chars) / Utf8_LTrim / Utf8_RTrim",
+       "Remove the given characters from both ends, the start or the end of a string"},
       {"<any other name>(args ...)",
        "Any Arrow compute function: name is lowercased and dispatched directly"},
   };
@@ -232,6 +237,16 @@ template <typename T> static T orThrow(arrow::Result<T>&& result) {
   if(!result.ok())
     throw std::runtime_error(result.status().ToStringWithoutContextLines());
   return std::move(result).ValueUnsafe();
+}
+
+// The column of table called columnName; throws "<operator>: no column named …" if there is none.
+static std::shared_ptr<arrow::ChunkedArray> columnNamed(arrow::Table const& table,
+                                                        std::string const& columnName,
+                                                        std::string const& operatorName) {
+  auto column = table.GetColumnByName(columnName);
+  if(!column)
+    throw std::runtime_error(operatorName + ": no column named '" + columnName + "'");
+  return column;
 }
 
 // Typed access to a user-supplied operator argument. Throws a readable error
@@ -311,7 +326,14 @@ static compute::QuantileOptions::Interpolation interpolation(std::string const& 
   return mode->second;
 }
 
-static bool takesOptions(std::string const& name) { return name == "round" || name == "strftime"; }
+static bool isTrim(std::string const& name) {
+  return name == "utf8_trim" || name == "utf8_ltrim" || name == "utf8_rtrim" ||
+         name == "ascii_trim" || name == "ascii_ltrim" || name == "ascii_rtrim";
+}
+
+static bool takesOptions(std::string const& name) {
+  return name == "round" || name == "strftime" || isTrim(name);
+}
 
 // Passes each option that follows a function's operand to set(key, value).
 // Options are either positional, in the order of positionalKeys, or given as
@@ -347,9 +369,22 @@ static void readOptions(std::string const& functionName, boss::ExpressionArgumen
   }
 }
 
-// The Arrow options of Round and Strftime, built from their trailing arguments.
+// The Arrow options of Round, Strftime and the trim functions, built from their
+// trailing arguments.
 static std::shared_ptr<compute::FunctionOptions> functionOptions(std::string const& name,
                                                                  boss::ExpressionArguments&& arguments) {
+  if(isTrim(name)) {
+    auto options = std::make_shared<compute::TrimOptions>();
+    readOptions(name, std::move(arguments), {"characters"},
+                [&](std::string const& key, boss::Expression&& value) {
+                  if(key != "characters")
+                    throw std::runtime_error(name + " has no option '" + key + "'");
+                  if(!std::holds_alternative<std::string>(value))
+                    throw std::runtime_error(name + " characters must be a string");
+                  options->characters = std::get<std::string>(std::move(value));
+                });
+    return options;
+  }
   if(name == "round") {
     auto options = std::make_shared<compute::RoundOptions>();
     readOptions("Round", std::move(arguments), {"ndigits", "round_mode"},
@@ -381,6 +416,35 @@ static std::shared_ptr<compute::FunctionOptions> functionOptions(std::string con
   return options;
 }
 
+// Formats timestamp with options.format. Arrow's strftime does not support "%-"
+// (no zero padding, e.g. "%-d" gives "5" rather than "05"), so each "%-x" is
+// formatted as "%x" with a leading zero removed, and the parts are joined.
+static compute::Expression strftimeExpression(compute::Expression const& timestamp,
+                                              compute::StrftimeOptions const& options) {
+  auto format = [&](std::string const& pattern) {
+    return compute::call("strftime", {timestamp},
+                         compute::StrftimeOptions(pattern, options.locale));
+  };
+  auto parts = std::vector<compute::Expression>();
+  auto const unpadded = std::regex("%-.");
+  for(auto const& token : std::ranges::subrange(
+          std::sregex_token_iterator(options.format.begin(), options.format.end(), unpadded,
+                                     {-1, 0}),
+          std::sregex_token_iterator())) {
+    if(token.str().starts_with("%-"))
+      parts.push_back(compute::call("replace_substring_regex",
+                                    {format("%" + token.str().substr(2))},
+                                    compute::ReplaceSubstringOptions("^0(\\d)", "\\1")));
+    else if(token.length() > 0)
+      parts.push_back(format(token.str()));
+  }
+  if(parts.size() == 1)
+    return parts.front();
+  // binary_join_element_wise takes the separator as its last argument
+  parts.push_back(compute::literal(std::make_shared<arrow::StringScalar>("")));
+  return compute::call("binary_join_element_wise", parts);
+}
+
 static compute::Expression toComputeExpression(boss::Expression&& e,
                                                std::set<std::string> const& columns = {}) {
   return std::visit(
@@ -407,8 +471,11 @@ static compute::Expression toComputeExpression(boss::Expression&& e,
             if(takesOptions(name) && arguments.size() > 1) {
               auto operand = toComputeExpression(std::move(arguments[0]), columns);
               arguments.erase(arguments.begin());
-              return compute::call(name, {std::move(operand)},
-                                   functionOptions(name, std::move(arguments)));
+              auto options = functionOptions(name, std::move(arguments));
+              return name == "strftime"
+                         ? strftimeExpression(operand,
+                                              static_cast<compute::StrftimeOptions const&>(*options))
+                         : compute::call(name, {std::move(operand)}, std::move(options));
             }
             // Arrow casts only int32 (not int64) day counts to date32
             if(name == "date" && arguments.size() == 1 &&
@@ -793,20 +860,32 @@ static Declaration aggregation(Declaration input, boss::ExpressionArguments::ite
                                 {"project", ProjectNodeOptions(projections, names)}});
 }
 
-// Range, Window and ExponentialMovingAverage. Like Cumulate and Pairwise, they
-// are computed directly on materialized columns, in row order, instead of
-// being planned with Acero.
+// Range, Window, ExponentialMovingAverage and KernelDensityEstimate. Like
+// Cumulate and Pairwise, they are computed directly on materialized columns,
+// in row order, instead of being planned with Acero.
 
 // One contiguous float64 array holding the named column.
 static std::shared_ptr<arrow::DoubleArray> doubleColumn(arrow::Table const& table,
-                                                        std::string const& columnName) {
-  auto column = table.GetColumnByName(columnName);
-  if(!column)
-    throw std::runtime_error("no column named '" + columnName + "'");
-  auto values = orThrow(arrow::Concatenate(column->chunks()));
+                                                        std::string const& columnName,
+                                                        std::string const& operatorName) {
+  auto values =
+      orThrow(arrow::Concatenate(columnNamed(table, columnName, operatorName)->chunks()));
   if(values->type_id() != arrow::Type::DOUBLE)
     values = orThrow(compute::Cast(*values, arrow::float64()));
   return std::static_pointer_cast<arrow::DoubleArray>(values);
+}
+
+// The value of an expression that refers to no columns, such as 0.5,
+// (Divide 1 42) or a one-row, one-column (ByName m), as a number.
+static double_t constantNumber(boss::Expression&& expression, std::string const& operatorName) {
+  auto bound = orThrow(toComputeExpression(std::move(expression)).Bind(arrow::Schema({})));
+  auto result = orThrow(compute::ExecuteScalarExpression(bound, compute::ExecBatch({}, 1)));
+  auto value = result.is_scalar() ? result.scalar() : orThrow(result.make_array()->GetScalar(0));
+  if(!value->is_valid ||
+     !(arrow::is_integer(value->type->id()) || arrow::is_floating(value->type->id())))
+    throw std::runtime_error(operatorName + " expects a number");
+  return std::static_pointer_cast<arrow::DoubleScalar>(orThrow(value->CastTo(arrow::float64())))
+      ->value;
 }
 
 static std::shared_ptr<arrow::Table> appendColumn(std::shared_ptr<arrow::Table> const& table,
@@ -894,18 +973,25 @@ static std::shared_ptr<arrow::Array> exponentialMovingAverage(arrow::DoubleArray
 }
 
 // (Window table aggregate… size [Partial]): appends one column per aggregate.
-static boss::Expression windowOperator(boss::ExpressionArguments&& arguments, bool partial) {
+// If orderColumn is given, the rows are sorted by it first.
+static boss::Expression windowOperator(boss::ExpressionArguments&& arguments, bool partial,
+                                       std::string const& orderColumn = "") {
   auto sizeIndex = arguments.size() - (partial ? 2 : 1);
   auto size = static_cast<int64_t>(numberArgument(arguments, sizeIndex, "Window", "a size"));
   if(size < 1)
     throw std::runtime_error("Window size must be at least 1");
   auto input = intermediates.getTable(intermediates.at(arguments[0]));
+  if(!orderColumn.empty())
+    input = orThrow(compute::Take(input, orThrow(compute::SortIndices(
+                                             *columnNamed(*input, orderColumn, "Window")))))
+                .table();
   auto table = input;
   auto windowed = [&](std::string function) {
     return [&, function](auto, auto aggregateArguments, auto) {
       auto columnName = std::get<Symbol>(aggregateArguments[0]).getName();
-      table = appendColumn(table, function + "(" + columnName + ")",
-                           window(*doubleColumn(*input, columnName), function, size, partial));
+      table = appendColumn(
+          table, function + "(" + columnName + ")",
+          window(*doubleColumn(*input, columnName, "Window"), function, size, partial));
       return true;
     };
   };
@@ -921,14 +1007,72 @@ static boss::Expression windowOperator(boss::ExpressionArguments&& arguments, bo
   return intermediates.putTable(table);
 }
 
-// (ExponentialMovingAverage table col …): appends exponential_moving_average(col).
-static boss::Expression exponentialMovingAverageOperator(boss::ExpressionArguments&& arguments,
-                                                         double_t alpha) {
+// (Window table aggregate… size [Partial] (OrderBy col)).
+static boss::Expression orderedWindowOperator(boss::ExpressionArguments&& arguments,
+                                              bool partial) {
+  auto [head, statics, keys, spans] =
+      std::get<ComplexExpression>(std::move(arguments.back())).decompose();
+  arguments.pop_back();
+  return windowOperator(std::move(arguments), partial, std::get<Symbol>(keys[0]).getName());
+}
+
+// (ExponentialMovingAverage table [outCol] col (Alpha a)) or (… (Span n)):
+// appends the moving average of col, named outCol or exponential_moving_average(col).
+static boss::Expression exponentialMovingAverageOperator(boss::ExpressionArguments&& arguments) {
+  auto [head, statics, parameters, spans] =
+      std::get<ComplexExpression>(std::move(arguments.back())).decompose();
+  auto parameter = constantNumber(std::move(parameters[0]), head.getName());
+  auto alpha = head.getName() == "Span" ? 2 / (parameter + 1) : parameter;
+  auto named = arguments.size() == 4;
+  auto columnName = std::get<Symbol>(arguments[named ? 2 : 1]).getName();
   auto table = intermediates.getTable(intermediates.at(arguments[0]));
-  auto columnName = std::get<Symbol>(arguments[1]).getName();
-  return intermediates.putTable(
-      appendColumn(table, "exponential_moving_average(" + columnName + ")",
-                   exponentialMovingAverage(*doubleColumn(*table, columnName), alpha)));
+  return intermediates.putTable(appendColumn(
+      table,
+      named ? std::get<Symbol>(arguments[1]).getName()
+            : "exponential_moving_average(" + columnName + ")",
+      exponentialMovingAverage(*doubleColumn(*table, columnName, "ExponentialMovingAverage"),
+                               alpha)));
+}
+
+// (KernelDensityEstimate table col (Grid start stop step) (Bandwidth h)): the
+// Gaussian kernel density of col at each grid point, as columns x and density.
+// (Bandwidth Silverman) sets h to 1.06 times the standard deviation times
+// count^(-1/5) (Silverman's rule of thumb). Null values are ignored.
+static boss::Expression kernelDensityEstimateOperator(boss::ExpressionArguments&& arguments) {
+  auto values = doubleColumn(*intermediates.getTable(intermediates.at(arguments[0])),
+                             std::get<Symbol>(arguments[1]).getName(), "KernelDensityEstimate");
+  auto [gridHead, gridStatics, grid, gridSpans] =
+      std::get<ComplexExpression>(std::move(arguments[2])).decompose();
+  auto [bandwidthHead, bandwidthStatics, bandwidth, bandwidthSpans] =
+      std::get<ComplexExpression>(std::move(arguments[3])).decompose();
+  auto count = values->length() - values->null_count();
+  auto standardDeviationOptions = compute::VarianceOptions(1);
+  auto width =
+      std::holds_alternative<Symbol>(bandwidth[0]) &&
+              std::get<Symbol>(bandwidth[0]).getName() == "Silverman"
+          ? 1.06 *
+                orThrow(compute::CallFunction("stddev", {values}, &standardDeviationOptions))
+                    .scalar_as<arrow::DoubleScalar>()
+                    .value *
+                std::pow(count, -0.2)
+          : constantNumber(std::move(bandwidth[0]), "Bandwidth");
+  if(count == 0 || !(width > 0))
+    throw std::runtime_error(
+        "KernelDensityEstimate needs at least one value and a positive bandwidth");
+  auto points = std::static_pointer_cast<arrow::DoubleArray>(
+      range(constantNumber(std::move(grid[0]), "Grid"), constantNumber(std::move(grid[1]), "Grid"),
+            constantNumber(std::move(grid[2]), "Grid"), false));
+  auto densities = arrow::DoubleBuilder();
+  for(auto point : *points) {
+    auto sum = 0.0;
+    for(auto value : *values)
+      if(value)
+        sum += std::exp(-0.5 * std::pow((*point - *value) / width, 2));
+    (void)densities.Append(sum / (count * width * std::sqrt(2 * M_PI)));
+  }
+  return intermediates.putTable(arrow::Table::Make(
+      arrow::schema({arrow::field("x", arrow::float64()), arrow::field("density", arrow::float64())}),
+      {points, *densities.Finish()}));
 }
 
 // (Resample table key aggregate… step): aggregates by key, then left-joins
@@ -1185,41 +1329,26 @@ static boss::Expression evaluate(boss::Expression&& e) {
            auto columnName = aggregateColumn(head, arguments);
            auto function = toArrowName(head.getName());
            auto input = intermediates.getTable(intermediates.at(dynamics[0]));
-           auto result = orThrow(compute::CallFunction("cumulative_" + function,
-                                                       {input->GetColumnByName(columnName)}))
-                             .chunked_array();
+           auto result =
+               orThrow(compute::CallFunction("cumulative_" + function,
+                                             {columnNamed(*input, columnName, "Cumulate")}))
+                   .chunked_array();
            return intermediates.putTable(orThrow(input->AddColumn(
                input->num_columns(), field(function + "(" + columnName + ")", result->type()),
                result)));
-         } < "Pairwise"_(AnySequence_) >=
+         } < "Pairwise"_(Any_, Symbol_, Symbol_, Integer_) >=
          Description("Difference between each row and the row lag rows before it; "
                      "the first lag rows are null") >
              Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
-           auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
-           auto column = get<Symbol>(dynamics.at(2)).getName();
-           auto combinedInput = input;
-           if(input->GetColumnByName(column)->num_chunks() != 1) {
-             auto maybeCombined = input->CombineChunks();
-             if(!maybeCombined.ok())
-               return boss::Expression {maybeCombined.status().ToStringWithoutContextLines()};
-             combinedInput = *maybeCombined;
-           }
-           auto inputArray = combinedInput->GetColumnByName(column);
-           auto maybeResult =
-               compute::CallFunction("pairwise_diff", {inputArray->chunk(0)}, &options);
-           if(!maybeResult.ok())
-             return boss::Expression {maybeResult.status().ToStringWithoutContextLines()};
-           auto maybeChunked = ChunkedArray::Make({maybeResult->make_array()});
-           if(!maybeChunked.ok())
-             return boss::Expression {maybeChunked.status().ToStringWithoutContextLines()};
-           auto maybeTable = input->AddColumn(
-               input->num_columns(),
-               field(get<Symbol>(dynamics.at(1)).getName(), maybeResult->type()), *maybeChunked);
-           if(!maybeTable.ok())
-             return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
-           return boss::Expression {intermediates.putTable(*maybeTable)};
+           auto input = intermediates.getTable(intermediates.at(dynamics[0]));
+           auto values = orThrow(arrow::Concatenate(
+               columnNamed(*input, std::get<Symbol>(dynamics[2]).getName(), "Pairwise")->chunks()));
+           auto options = compute::PairwiseOptions(
+               static_cast<int64_t>(numberArgument(dynamics, 3, "Pairwise", "a lag")));
+           return intermediates.putTable(appendColumn(
+               input, std::get<Symbol>(dynamics[1]).getName(),
+               orThrow(compute::CallFunction("pairwise_diff", {values}, &options)).make_array()));
          } < "Range"_(Symbol_, Any_, Any_, Any_) >=
          Description("Construct a one-column table of evenly spaced values from start "
                      "to stop (inclusive)") > Recurse(evaluate) >
@@ -1233,29 +1362,46 @@ static boss::Expression evaluate(boss::Expression&& e) {
            return intermediates.putTable(arrow::Table::Make(
                arrow::schema({arrow::field(std::get<Symbol>(dynamics[0]).getName(), values->type())}),
                {values}));
-         } < "Window"_(Any_, AnySequence_, Integer_, Symbol("Partial")) >=
+         } < "Window"_(Any_, AnySequence_, Integer_, Symbol("Partial"), "OrderBy"_(Symbol_)) >=
          Description("Aggregate a column (Sum, Mean, Min, Max, Count) over each row and "
-                     "the rows before it, size rows in total; the first rows are null "
-                     "unless Partial is given") >
+                     "the rows before it, size rows in total, in input order or sorted by "
+                     "(OrderBy col); the first rows are null unless Partial is given") >
          Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return orderedWindowOperator(std::move(dynamics), true);
+         } < "Window"_(Any_, AnySequence_, Integer_, "OrderBy"_(Symbol_)) >= Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return orderedWindowOperator(std::move(dynamics), false);
+         } < "Window"_(Any_, AnySequence_, Integer_, Symbol("Partial")) >= Recurse(evaluate) >
          [](auto, auto dynamics, auto) { return windowOperator(std::move(dynamics), true); } <
          "Window"_(Any_, AnySequence_, Integer_) >= Recurse(evaluate) >
          [](auto, auto dynamics, auto) { return windowOperator(std::move(dynamics), false); } <
          "ExponentialMovingAverage"_(Any_, Symbol_, "Alpha"_(Any_)) >=
-         Description("Exponentially weighted moving average of a column; (Alpha a) "
-                     "gives each new row weight a, (Span n) sets a to 2/(n+1)") >
+         Description("Exponentially weighted moving average of a column, optionally "
+                     "named outCol; (Alpha a) gives each new row weight a, (Span n) sets a "
+                     "to 2/(n+1); a and n may be constant expressions") >
          Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           auto [head, statics, parameters, spans] =
-               std::get<ComplexExpression>(std::move(dynamics[2])).decompose();
-           return exponentialMovingAverageOperator(
-               std::move(dynamics), numberArgument(parameters, 0, "Alpha", "a number"));
+           return exponentialMovingAverageOperator(std::move(dynamics));
          } < "ExponentialMovingAverage"_(Any_, Symbol_, "Span"_(Any_)) >= Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           auto [head, statics, parameters, spans] =
-               std::get<ComplexExpression>(std::move(dynamics[2])).decompose();
-           return exponentialMovingAverageOperator(
-               std::move(dynamics), 2 / (numberArgument(parameters, 0, "Span", "a number") + 1));
+           return exponentialMovingAverageOperator(std::move(dynamics));
+         } < "ExponentialMovingAverage"_(Any_, Symbol_, Symbol_, "Alpha"_(Any_)) >=
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return exponentialMovingAverageOperator(std::move(dynamics));
+         } < "ExponentialMovingAverage"_(Any_, Symbol_, Symbol_, "Span"_(Any_)) >=
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return exponentialMovingAverageOperator(std::move(dynamics));
+         } < "KernelDensityEstimate"_(Any_, Symbol_, "Grid"_(Any_, Any_, Any_),
+                                      "Bandwidth"_(Any_)) >=
+         Description("Gaussian kernel density of a column at each point of a grid, as "
+                     "columns x and density; (Bandwidth Silverman) picks the bandwidth "
+                     "from the data") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return kernelDensityEstimateOperator(std::move(dynamics));
          } < "Resample"_(Any_, Symbol_, AnySequence_, Any_, "Fill"_(Any_)) >=
          Description("Aggregate grouped by a numeric key column, with one row per step "
                      "from the smallest to the largest key; the output is sorted; keys "

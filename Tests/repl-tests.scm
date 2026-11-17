@@ -251,6 +251,10 @@
         '(Table (A 1 2 3) (|sum(A)| 1 3 6))
         (boss-eval (Cumulate (Table (A 1 2 3)) (Sum A))))
 
+  (test "Cumulate: unknown column is a readable error"
+        "Cumulate: no column named 'b'"
+        (boss-eval (Cumulate (Table (a 1 2)) (Sum b))))
+
   ;;; Pairwise
   ;; pairwise_diff: out[i] = in[i] - in[i-lag]; first lag elements are NULL
 
@@ -261,6 +265,17 @@
   (test "Pairwise: diff with lag 2"
         '(Table (A 1 2 4 8) (diff NULL NULL 3 6))
         (boss-eval (Pairwise (Table (A 1 2 4 8)) diff A 2)))
+
+  (test "Pairwise: unknown column is an error and named tables survive"
+        '("Pairwise: no column named 'b'" (Table (z 1)))
+        (begin
+          (boss-eval (Name (Table (z 1)) probe))
+          (list (boss-eval (Pairwise (Table (a 1 2)) a b 1))
+                (boss-eval (ByName probe)))))
+
+  (test "Pairwise: too few arguments leave the expression unevaluated"
+        '(Pairwise (Table (a 1 2)) a 1)
+        (boss-eval (Pairwise (Table (a 1 2)) a 1)))
 
   ;;; Range
 
@@ -302,7 +317,47 @@
         "Window supports (Sum col), (Mean col), (Min col), (Max col) and (Count col)"
         (boss-eval (Window (Table (p 1)) (Median p) 2)))
 
+  (test "Window: rows sorted by OrderBy first"
+        '(Table (t 1 2 3) (a 10 20 30) (|sum(a)| NULL 30.0 50.0))
+        (boss-eval (Window (Table (t 3 1 2) (a 30 10 20)) (Sum a) 2 (OrderBy t))))
+
+  (test "Window: Partial with OrderBy"
+        '(Table (t 1 2 3) (a 10 20 30) (|sum(a)| 10.0 30.0 50.0))
+        (boss-eval (Window (Table (t 3 1 2) (a 30 10 20)) (Sum a) 2 Partial (OrderBy t))))
+
+  (test "Window: unknown column is a readable error"
+        "Window: no column named 'b'"
+        (boss-eval (Window (Table (a 1 2)) (Sum b) 2)))
+
   ;;; ExponentialMovingAverage
+
+  (test "ExponentialMovingAverage: named output and a constant expression as Alpha"
+        '(Table (l 6.0 0.0 6.0) (e 3.0 1.5 3.75))
+        (boss-eval (ExponentialMovingAverage (Table (l 6.0 0.0 6.0)) e l (Alpha (Divide 1 2)))))
+
+  (test "ExponentialMovingAverage: a named one-row, one-column table as Alpha"
+        '(Table (l 6.0 0.0 6.0) (|exponential_moving_average(l)| 3.0 1.5 3.75))
+        (begin
+          (boss-eval (Name (GroupBy (Table (x 0.25 0.75)) (Mean x)) half))
+          (boss-eval (ExponentialMovingAverage (Table (l 6.0 0.0 6.0)) l (Alpha (ByName half))))))
+
+  (test "ExponentialMovingAverage: unknown column is a readable error"
+        "ExponentialMovingAverage: no column named 'b'"
+        (boss-eval (ExponentialMovingAverage (Table (a 1 2)) b (Alpha 0.5))))
+
+  ;;; KernelDensityEstimate
+
+  (test "KernelDensityEstimate: Gaussian kernel with a given bandwidth"
+        '(Table (x -1.0 0.0 1.0)
+                (density 0.24197072451914337 0.3989422804014327 0.24197072451914337))
+        (boss-eval (KernelDensityEstimate (Table (v 0.0)) v (Grid -1 1 1) (Bandwidth 1))))
+
+  (test "KernelDensityEstimate: Silverman bandwidth, nulls ignored"
+        '(Table (x 2.0) (density 0.3129662476329552))
+        (boss-eval
+          (KernelDensityEstimate (Table (v 1.0 2.0 3.0 NULL)) v (Grid 2 2 1) (Bandwidth Silverman))))
+
+  ;;; ExponentialMovingAverage, unnamed
 
   (test "ExponentialMovingAverage: Alpha; null rows keep the previous average"
         '(Table (x 10 NULL 20) (|exponential_moving_average(x)| 5.0 5.0 12.5))
@@ -527,6 +582,18 @@
         '(Table (s "15 Nov 2026 07:42"))
         (boss-eval
           (Project (Table (t 1794728533)) (As (Strftime (Timestamp t) "%d %b %Y %H:%M") s))))
+
+  (test "Strftime: %- drops the leading zero"
+        '(Table (s "9 Nov 2026, 7:42") (p "09"))
+        (boss-eval
+          (Project (Table (t 1794210133))
+                   (As (Strftime (Timestamp t) "%-d %b %Y, %-H:%M") s)
+                   (As (Strftime (Timestamp t) "%d") p))))
+
+  (test "Utf8_LTrim and Utf8_Trim: characters to remove"
+        '(Table (a "4'51''" "  x ") (b "04'51''" "x"))
+        (boss-eval
+          (Project (Table (s "04'51''" "  x ")) (As (Utf8_ltrim s "0") a) (As (Utf8_trim s " ") b))))
 
   ;;; Function options
 

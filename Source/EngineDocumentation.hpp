@@ -62,14 +62,24 @@ struct EngineSymbolLiteral {
 
 private:
   template <typename Argument> static void captureArgumentName(Argument const& argument) {
+    using namespace boss::utilities::experimental::sentinel;
     if constexpr(std::is_same_v<std::decay_t<Argument>, boss::Symbol>) {
-      if(argument == boss::utilities::experimental::sentinel::AnySequence_) {
+      if(argument == AnySequence_) {
         lastPatternArgNames.emplace_back("AnySequence_");
-      } else if(argument == boss::utilities::experimental::sentinel::Any_) {
+      } else if(argument == Any_) {
         lastPatternArgNames.emplace_back("Any_");
+      } else if(argument == Symbol_) {
+        lastPatternArgNames.emplace_back("Symbol_");
+      } else if(argument == Integer_) {
+        lastPatternArgNames.emplace_back("Integer_");
+      } else if(argument == String_) {
+        lastPatternArgNames.emplace_back("String_");
       } else {
         lastPatternArgNames.emplace_back(argument.getName());
       }
+    } else if constexpr(std::is_constructible_v<boss::ComplexExpression, Argument const&> ||
+                        std::is_constructible_v<boss::ComplexExpression, Argument&&>) {
+      lastPatternArgNames.emplace_back("(...)"); // a nested pattern
     } else {
       lastPatternArgNames.emplace_back("?");
     }

@@ -13,6 +13,9 @@ For implementation guidance, see [`EngineImplementationGuide.md`](EngineImplemen
 - **Operator heads** are written in PascalCase (`Filter`, `OrderBy`, `GroupBy`, `LeftJoin`). Internally, ArrowComputeEngine lowercases them and applies aliases (see `toArrowName` in the source).
 - **Symbols inside operator arguments** are column references if they match a column name in the input schema, and symbol-valued literals otherwise. This is what lets `(Equal sport Running)` parse as "the `sport` column equals the symbol `Running`" without needing an explicit quote.
 - **String literals** are always values: `(Filter t (Equal name "Alice"))`.
+- **Integer literals** are int64, both in expressions and in `Table`. A `Table` column that mixes integer and floating literals is float64.
+- **Errors** are returned as a string result (e.g. `"Mean expects exactly 1 argument, got 2"`); the engine and its named tables stay alive.
+- **Malformed operators stay unevaluated.** Operator shapes are matched by pattern (e.g. `Slice(table Integer Integer)`); an expression that matches no pattern is returned unevaluated, as with any expression the engine does not handle.
 - **Auto-cast for date literals**: bare `YYYY-MM-DD` string literals appearing as the right-hand side of a comparison are auto-cast to Arrow `date32`.
 - **Output column names** for aggregates follow the form `fn(col)`, e.g. `sum(quantity)`. They become BOSS symbols that, because they contain parentheses, must be quoted with `|…|` syntax in Scheme: `|sum(quantity)|`.
 - **Pipeline composition**: every operator that consumes a "table" accepts any other operator that produces a table. There is no separate plan-builder mode.
@@ -137,11 +140,13 @@ Aggregates one or more columns. Each aggregator is a unary expression naming a c
 - Group keys, if any, follow all aggregators as bare symbols.
 - Without keys, it is a global aggregate (single-row output).
 - Output columns are named `fn(col)` (e.g. `sum(quantity)`); rename them in a subsequent `Project (As …)` for ergonomic results.
+- `(Median col)` and `(Quantile col q [interpolation])` compute exact quantiles as float64, skipping nulls. The interpolation between neighbouring values is `Linear` (default), `Lower`, `Higher`, `Nearest` or `Midpoint`.
 
 **Example:**
 
 ```scheme
 (GroupBy lineitem (Sum quantity) (CountAll) returnflag linestatus)
+(GroupBy laps (Median pace) (Quantile pace 0.99 Lower))
 ```
 
 **HAVING** is expressed as `Filter` after `GroupBy`:
@@ -174,6 +179,50 @@ Appends a column `out-col` whose value at row `i` is `in-col[i] − in-col[i −
 
 ```scheme
 (Pairwise (Cumulate sales (Sum revenue)) smoothed_revenue |sum(revenue)| 7)
+```
+
+### `Window(table (agg col) … size [Partial])`
+
+Appends one column per aggregate, holding the aggregate of each row and the `size − 1` rows before it. Supported aggregates are `Sum`, `Mean`, `Min`, `Max` and `Count`; nulls are ignored. The first `size − 1` rows are `NULL`; with `Partial`, they aggregate the rows available instead. Output columns are named `fn(col)`.
+
+**Example:**
+
+```scheme
+(Window readings (Mean power) 30)    ; appends |mean(power)|, the mean of the last 30 rows
+```
+
+### `ExponentialMovingAverage(table col (Alpha a))` / `ExponentialMovingAverage(table col (Span n))`
+
+Appends a column containing the exponentially weighted moving average of the named column. Starting from 0, each row moves the average towards its value by the fraction `a`; null rows keep the previous average. `(Span n)` sets `a` to `2/(n+1)`. Output column is named `exponential_moving_average(col)`.
+
+**Example:**
+
+```scheme
+(ExponentialMovingAverage daily load (Alpha 0.1))
+```
+
+### `Resample(table key (agg col) … step [(Fill v)])`
+
+Aggregates like `GroupBy`, grouped by `key`, a numeric column of `table`, with one row per `step` from the smallest to the largest key. The output is sorted. Keys without input rows get the fill value (default `0`) in every aggregate column.
+
+**Example:**
+
+```scheme
+(Resample sessions day (Sum load) 1)    ; one row per day, 0 on days without sessions
+```
+
+---
+
+## Generators
+
+### `Range(col start stop step)`
+
+Constructs a one-column table of evenly spaced values from `start` to `stop` (inclusive). The column is int64 if all three bounds are integers, otherwise float64.
+
+**Example:**
+
+```scheme
+(Range x 50.0 175.0 0.5)    ; 50.0, 50.5, …, 175.0
 ```
 
 ---
@@ -221,7 +270,7 @@ Left anti join. Returns left rows with *no* match in right.
 
 ### `Union(table table …)`
 
-Concatenates two or more tables (bag union — duplicates are preserved, matching SQL `UNION ALL`). Schemas are unified across inputs: columns absent from a given input are filled with nulls (which surface as `NULL` symbols when materialized). Rows appear in input order: `(Union a b c)` yields a's rows, then b's, then c's. For set-style union without duplicates, follow with `GroupBy` on all columns.
+Concatenates two or more tables (bag union — duplicates are preserved, matching SQL `UNION ALL`). Schemas are unified across inputs: numeric columns are widened to a common type (int32 → int64 → float64), and columns absent from a given input are filled with nulls (which surface as `NULL` symbols when materialized). Rows appear in input order: `(Union a b c)` yields a's rows, then b's, then c's. For set-style union without duplicates, follow with `GroupBy` on all columns.
 
 **Example:**
 
@@ -241,6 +290,19 @@ Stores `table` under the symbol `sym` in the engine's name registry and marks it
 ### `ByName(sym)`
 
 Retrieves the table previously stored under `sym`. This lets the user express shared subplans as named bindings, turning a DAG edge into a tree reference.
+
+Inside a `Filter`, `Project` or `Join` expression, a table with one row and one column stands for its value, so a named aggregate can be used like a variable:
+
+```scheme
+(Name (GroupBy readings (Mean heart_rate)) mean_heart_rate)
+(Project readings (As (Subtract heart_rate (ByName mean_heart_rate)) deviation))
+```
+
+```scheme
+(Name (GroupBy rec (Mean heart_rate)) mean_hr)
+(Project rec (As (Subtract heart_rate (ByName mean_hr)) deviation))
+(Project zones z (As (Divide (Multiply 100.0 |count_all()|) (GroupBy rec (CountAll))) pct))
+```
 
 **Example — shared subplan:**
 
@@ -304,7 +366,9 @@ These are not standalone operators but appear inside `Filter` predicates and `Pr
 
 | BOSS head                | Maps to (Arrow)         | Notes                                      |
 |--------------------------|-------------------------|--------------------------------------------|
-| `Add`, `Subtract`, `Multiply`, `Divide` | same                    | arithmetic                                 |
+| `Add`, `Subtract`, `Multiply` | same               | arithmetic                                 |
+| `Divide`                 | `divide` on float64     | floating-point division, also for integer operands |
+| `IntDivide`              | `divide`                | keeps the operand type: integers divide as integers |
 | `Equal`, `NotEqual`      | `equal`, `not_equal`    |                                            |
 | `Less`, `LessEqual`      | `less`, `less_equal`    |                                            |
 | `Greater`, `GreaterEqual`| `greater`, `greater_equal` |                                         |
@@ -312,10 +376,18 @@ These are not standalone operators but appear inside `Filter` predicates and `Pr
 | `Not`                    | `invert`                |                                            |
 | `IfElse`                 | `if_else`               | `(IfElse cond then else)`                  |
 | `IsValid`                | `is_valid`              | null check                                 |
-| `Int`, `Bool`, `Date`, `Timestamp` | `cast`        | type casts                                 |
+| `Int`, `Int64`, `Bool`, `Date` | `cast`              | type casts (`Int` is int32, `Int64` is int64) |
+| `Timestamp`              | `boss_to_timestamp` (engine) | cast to `timestamp[s, UTC]`; numbers are seconds since 1970 |
+| `Modulo`                 | `boss_modulo` (engine)  | remainder of `x / n`, with the sign of `n`: `(Modulo -7 5)` is 3 |
 | `Like`                   | `match_like`            | `(Like col "pat%")`                        |
 | `Between`                | (desugared)             | `(Between v lo hi)` → `(And ≥ ≤)`          |
 | `Year`, `Month`, `Day`   | same                    | temporal extractors on `timestamp[s, UTC]` |
+| `Hour`, `Minute`, `Second` | same                  | time-of-day extractors on `timestamp[s, UTC]` |
+| `DayOfWeek`              | `day_of_week`           | Monday = 0                                 |
+| `Round`                  | `round`                 | `(Round x ndigits mode)`: round to `ndigits` decimal places (default 0); mode is `HalfToEven` (default), `HalfUp`, `HalfDown`, `Down`, `Up`, `TowardsZero`, `TowardsInfinity`, `HalfTowardsZero`, `HalfTowardsInfinity` or `HalfToOdd` |
+| `Strftime`               | `strftime`              | `(Strftime ts format)`: format a timestamp as a string, e.g. `"%d %b %Y"` |
+
+`Round` and `Strftime` take their settings after the operand, either in order (`(Round x 2 Down)`) or by name (`(Round x (Options (ndigits 2) (round_mode Down)))`).
 
 Aggregator heads inside `GroupBy` / `Cumulate`:
 
@@ -327,6 +399,7 @@ Aggregator heads inside `GroupBy` / `Cumulate`:
 | `Max`         | `max` / `hash_max`           |
 | `Count`       | `count` / `hash_count`       |
 | `CountAll`    | `count_all` / `hash_count_all` |
+| `Median`, `Quantile` | `quantile` per group (GroupBy only) |
 
 (The `hash_` prefix is applied automatically by ArrowComputeEngine when group keys are present.)
 

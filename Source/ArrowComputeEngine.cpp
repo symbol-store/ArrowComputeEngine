@@ -4,6 +4,8 @@
 #include <Utilities.hpp>
 #include <algorithm>
 #include <arrow/api.h>
+#include <cmath>
+#include <deque>
 #include <filesystem>
 
 #include <arrow/acero/api.h>
@@ -13,13 +15,20 @@
 #include <arrow/io/api.h>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 using namespace boss::utilities::experimental;
+using boss::utilities::experimental::sentinel::Any_;
+using boss::utilities::experimental::sentinel::AnySequence_;
+using boss::utilities::experimental::sentinel::Integer_;
+using boss::utilities::experimental::sentinel::String_;
+using boss::utilities::experimental::sentinel::Symbol_;
 using namespace arrow;
 using namespace acero;
 using arrow::Table;
@@ -70,7 +79,12 @@ static struct {
     names[name] = std::get<int64_t>(key);
     return std::move(key);
   }
-  int64_t byName(boss::Symbol name) { return names.at(name); }
+  int64_t byName(boss::Symbol name) {
+    auto it = names.find(name);
+    if(it == names.end())
+      throw std::runtime_error("no table named '" + name.getName() + "'");
+    return it->second;
+  }
 
   int64_t put(Declaration&& table) {
     auto id = generateID();
@@ -92,32 +106,23 @@ static struct {
                       key);
   }
 
-  boss::Expression convertResult(boss::Expression const& key) {
+  // Replaces every table handle in key, at any depth, by its (Table …) expression.
+  boss::Expression convertResult(boss::Expression&& key) {
     if(std::holds_alternative<ComplexExpression>(key)) {
-      auto const& ce = std::get<ComplexExpression>(key);
-      boss::ExpressionArguments newDynamics;
-      newDynamics.reserve(ce.getDynamicArguments().size());
-      for(auto const& arg : ce.getDynamicArguments())
-        newDynamics.push_back(convertResult(arg));
-      boss::expressions::ExpressionSpanArguments clonedSpans;
-      clonedSpans.reserve(ce.getSpanArguments().size());
-      for(auto const& span : ce.getSpanArguments())
-        clonedSpans.push_back(std::visit(
-            [](auto const& v) -> boss::expressions::ExpressionSpanArgument {
-              return v.clone(boss::expressions::CloneReason::EVALUATE_CONST_EXPRESSION);
-            },
-            span));
-      return ComplexExpression(boss::Symbol(ce.getHead()), {}, std::move(newDynamics),
-                               std::move(clonedSpans));
+      auto [head, statics, dynamics, spans] = std::get<ComplexExpression>(std::move(key)).decompose();
+      for(auto& argument : dynamics)
+        argument = convertResult(std::move(argument));
+      return ComplexExpression(std::move(head), std::move(statics), std::move(dynamics),
+                               std::move(spans));
     }
     if(!std::holds_alternative<int64_t>(key))
-      return key.clone(boss::expressions::CloneReason::EVALUATE_CONST_EXPRESSION);
+      return std::move(key);
     auto maybeTable = arrow::acero::DeclarationToTable(at(key), false);
     if(!maybeTable.ok())
       return maybeTable.status().ToStringWithoutContextLines();
     auto table = *maybeTable;
     boss::ExpressionArguments resultExpression;
-    for(auto i = 0u; i < table->num_columns(); i++) {
+    for(auto i : std::views::iota(0, table->num_columns())) {
       auto resultColumn = table->column(i);
       auto f = table->field(i);
       auto md = f->metadata();
@@ -125,7 +130,7 @@ static struct {
           md && md->FindKey("boss_type") >= 0 && md->value(md->FindKey("boss_type")) == "symbol";
       boss::ExpressionArguments colValues;
       if(isSymbolCol) {
-        for(auto j = 0u; j < resultColumn->length(); j++) {
+        for(auto j : std::views::iota(int64_t(0), resultColumn->length())) {
           auto scalar = resultColumn->GetScalar(j).ValueUnsafe();
           if(!scalar->is_valid)
             colValues.push_back("NULL"_);
@@ -135,7 +140,7 @@ static struct {
         }
       } else {
         auto visitor = ColumnConverter();
-        for(auto j = 0u; j < resultColumn->length(); j++)
+        for(auto j : std::views::iota(int64_t(0), resultColumn->length()))
           (void)arrow::VisitScalarInline(*resultColumn->GetScalar(j).ValueUnsafe(), &visitor);
         colValues = std::move(visitor).getColumnValues();
       }
@@ -169,6 +174,7 @@ static std::string toArrowName(std::string name) {
       {"not", "invert"},
       {"avg", "mean"},
       {"isvalid", "is_valid"},
+      {"dayofweek", "day_of_week"},
   };
   auto it = aliases.find(name);
   return it != aliases.end() ? it->second : name;
@@ -199,61 +205,251 @@ static std::vector<ExpressionFunctionDescription> const& expressionFunctions() {
       {"Between(col low high)", "Inclusive range: low <= col <= high"},
       {"IfElse(cond then else)", "Conditional expression"},
       {"IsValid(col)", "True where col is non-null"},
+      {"Divide(a b)", "Floating-point division, also for integer operands"},
+      {"IntDivide(a b)", "Division that keeps the operand type; integers divide as integers"},
       {"Int(expr)", "Cast expression to int32"},
+      {"Int64(expr)", "Cast expression to int64"},
       {"Bool(expr)", "Cast expression to boolean"},
       {"Date(expr)", "Cast expression to date32"},
-      {"Timestamp(expr)", "Cast expression to UTC second-resolution timestamp"},
+      {"Timestamp(expr)",
+       "Cast expression to UTC second-resolution timestamp; numbers are seconds since 1970"},
+      {"Hour(ts) / Minute(ts) / Second(ts)", "Hour, minute or second of a timestamp"},
+      {"Year(ts) / Month(ts) / Day(ts)", "Year, month or day of a timestamp or date"},
+      {"DayOfWeek(ts)", "Day of the week of a timestamp or date (Monday = 0)"},
+      {"Modulo(x n)", "Remainder of x divided by n, with the sign of n"},
+      {"Round(x [ndigits] [mode])",
+       "Round to ndigits decimal places (default 0) using the rounding mode (default "
+       "HalfToEven)"},
+      {"Strftime(ts format)", "Format a timestamp as a string, e.g. \"%d %b %Y\""},
       {"<any other name>(args ...)",
        "Any Arrow compute function: name is lowercased and dispatched directly"},
   };
   return functions;
 }
 
-static compute::Expression toComputeExpression(boss::Expression const& e,
+// The value of an Arrow result; throws on error (ValueOrDie would abort the process).
+template <typename T> static T orThrow(arrow::Result<T>&& result) {
+  if(!result.ok())
+    throw std::runtime_error(result.status().ToStringWithoutContextLines());
+  return std::move(result).ValueUnsafe();
+}
+
+// Typed access to a user-supplied operator argument. Throws a readable error
+// (caught at the extern "C" boundary) instead of std::bad_variant_access.
+template <typename T>
+static T argumentAs(boss::ExpressionArguments const& arguments, size_t index,
+                    std::string const& operatorName, std::string const& expected) {
+  if(index >= arguments.size() || !std::holds_alternative<T>(arguments[index]))
+    throw std::runtime_error(operatorName + " expects " + expected + " as argument " +
+                             std::to_string(index + 1));
+  return std::get<T>(arguments[index]);
+}
+
+static bool isNumber(boss::Expression const& argument) {
+  return std::holds_alternative<int8_t>(argument) || std::holds_alternative<int32_t>(argument) ||
+         std::holds_alternative<int64_t>(argument) || std::holds_alternative<double_t>(argument);
+}
+
+static double_t numberArgument(boss::ExpressionArguments const& arguments, size_t index,
+                               std::string const& operatorName, std::string const& expected) {
+  if(index >= arguments.size() || !isNumber(arguments[index]))
+    throw std::runtime_error(operatorName + " expects " + expected + " as argument " +
+                             std::to_string(index + 1));
+  return std::visit(
+      [](auto const& value) -> double_t {
+        if constexpr(std::is_arithmetic_v<std::decay_t<decltype(value)>>)
+          return static_cast<double_t>(value);
+        else
+          return 0;
+      },
+      arguments[index]);
+}
+
+// The column an aggregate like (Sum col) reduces.
+static std::string aggregateColumn(Symbol const& head, boss::ExpressionArguments const& arguments) {
+  if(arguments.size() != (head.getName() == "CountAll" ? 0u : 1u))
+    throw std::runtime_error(head.getName() + " expects exactly " +
+                             (head.getName() == "CountAll" ? "0 arguments" : "1 argument") +
+                             ", got " + std::to_string(arguments.size()));
+  return argumentAs<Symbol>(arguments, 0, head.getName(), "a column name").getName();
+}
+
+static compute::RoundMode roundMode(std::string const& name) {
+  static std::unordered_map<std::string, compute::RoundMode> const modes = {
+      {"Down", compute::RoundMode::DOWN},
+      {"Up", compute::RoundMode::UP},
+      {"TowardsZero", compute::RoundMode::TOWARDS_ZERO},
+      {"TowardsInfinity", compute::RoundMode::TOWARDS_INFINITY},
+      {"HalfDown", compute::RoundMode::HALF_DOWN},
+      {"HalfUp", compute::RoundMode::HALF_UP},
+      {"HalfTowardsZero", compute::RoundMode::HALF_TOWARDS_ZERO},
+      {"HalfTowardsInfinity", compute::RoundMode::HALF_TOWARDS_INFINITY},
+      {"HalfToEven", compute::RoundMode::HALF_TO_EVEN},
+      {"HalfToOdd", compute::RoundMode::HALF_TO_ODD},
+  };
+  auto mode = modes.find(name);
+  if(mode == modes.end())
+    throw std::runtime_error("Round mode must be one of Down, Up, TowardsZero, TowardsInfinity, "
+                             "HalfDown, HalfUp, HalfTowardsZero, HalfTowardsInfinity, "
+                             "HalfToEven, HalfToOdd");
+  return mode->second;
+}
+
+static compute::QuantileOptions::Interpolation interpolation(std::string const& name) {
+  static std::unordered_map<std::string, compute::QuantileOptions::Interpolation> const
+      interpolations = {
+          {"Linear", compute::QuantileOptions::LINEAR},
+          {"Lower", compute::QuantileOptions::LOWER},
+          {"Higher", compute::QuantileOptions::HIGHER},
+          {"Nearest", compute::QuantileOptions::NEAREST},
+          {"Midpoint", compute::QuantileOptions::MIDPOINT},
+      };
+  auto mode = interpolations.find(name);
+  if(mode == interpolations.end())
+    throw std::runtime_error(
+        "Quantile interpolation must be one of Linear, Lower, Higher, Nearest, Midpoint");
+  return mode->second;
+}
+
+static bool takesOptions(std::string const& name) { return name == "round" || name == "strftime"; }
+
+// Passes each option that follows a function's operand to set(key, value).
+// Options are either positional, in the order of positionalKeys, or given as
+// (Options (key value) …).
+template <typename Set>
+static void readOptions(std::string const& functionName, boss::ExpressionArguments&& arguments,
+                        std::vector<std::string> const& positionalKeys, Set&& set) {
+  auto position = 0u;
+  for(auto& argument : arguments) {
+    if(!std::holds_alternative<ComplexExpression>(argument)) {
+      if(position == positionalKeys.size())
+        throw std::runtime_error(functionName + " takes at most " +
+                                 std::to_string(positionalKeys.size()) + " option arguments");
+      set(positionalKeys[position++], std::move(argument));
+    } else {
+      boss::Expression read = std::move(argument) < "Options"_(AnySequence_) >
+                              [&](auto, auto settings, auto) {
+                                for(auto& setting : settings) {
+                                  if(!std::holds_alternative<ComplexExpression>(setting))
+                                    throw std::runtime_error("Options expects (key value) pairs");
+                                  auto [key, statics, values, spans] =
+                                      std::get<ComplexExpression>(std::move(setting)).decompose();
+                                  if(values.size() != 1)
+                                    throw std::runtime_error("Options expects (key value) pairs");
+                                  set(key.getName(), std::move(values[0]));
+                                }
+                                return true;
+                              };
+      if(!std::holds_alternative<bool>(read))
+        throw std::runtime_error(functionName +
+                                 " expects option literals or (Options (key value) …)");
+    }
+  }
+}
+
+// The Arrow options of Round and Strftime, built from their trailing arguments.
+static std::shared_ptr<compute::FunctionOptions> functionOptions(std::string const& name,
+                                                                 boss::ExpressionArguments&& arguments) {
+  if(name == "round") {
+    auto options = std::make_shared<compute::RoundOptions>();
+    readOptions("Round", std::move(arguments), {"ndigits", "round_mode"},
+                [&](std::string const& key, boss::Expression&& value) {
+                  if(key == "ndigits" && std::holds_alternative<int32_t>(value))
+                    options->ndigits = std::get<int32_t>(value);
+                  else if(key == "round_mode" && std::holds_alternative<Symbol>(value))
+                    options->round_mode = roundMode(std::get<Symbol>(value).getName());
+                  else if(key == "ndigits" || key == "round_mode")
+                    throw std::runtime_error("Round " + key + " must be " +
+                                             (key == "ndigits" ? "an integer" : "a mode symbol"));
+                  else
+                    throw std::runtime_error("round has no option '" + key + "'");
+                });
+    return options;
+  }
+  auto options = std::make_shared<compute::StrftimeOptions>();
+  readOptions("Strftime", std::move(arguments), {"format", "locale"},
+              [&](std::string const& key, boss::Expression&& value) {
+                if(!std::holds_alternative<std::string>(value))
+                  throw std::runtime_error("Strftime " + key + " must be a string");
+                if(key == "format")
+                  options->format = std::get<std::string>(std::move(value));
+                else if(key == "locale")
+                  options->locale = std::get<std::string>(std::move(value));
+                else
+                  throw std::runtime_error("strftime has no option '" + key + "'");
+              });
+  return options;
+}
+
+static compute::Expression toComputeExpression(boss::Expression&& e,
                                                std::set<std::string> const& columns = {}) {
   return std::visit(
       boss::utilities::overload(
           // symbol: column ref if the name exists in the schema, otherwise a symbol-value literal
-          [&columns](Symbol const& s) {
+          [&columns](Symbol&& s) {
             return columns.count(s.getName())
                        ? compute::field_ref(s.getName())
                        : compute::literal(std::make_shared<arrow::StringScalar>(s.getName()));
           },
-          [](std::string const& s) {
-            return compute::literal(std::make_shared<arrow::StringScalar>(s));
+          [](std::string&& s) {
+            return compute::literal(std::make_shared<arrow::StringScalar>(std::move(s)));
           },
-          [&columns](ComplexExpression const& ce) {
-            auto name = toArrowName(ce.getHead().getName());
+          [&columns](ComplexExpression&& ce) {
+            auto [head, statics, arguments, spans] = std::move(ce).decompose();
+            auto name = toArrowName(head.getName());
+            // these functions take their trailing arguments as options, not operands
+            if(name == "like" || name == "match_substring") {
+              auto operand = toComputeExpression(std::move(arguments.at(0)), columns);
+              return compute::call(
+                  name == "like" ? "match_like" : name, {std::move(operand)},
+                  compute::MatchSubstringOptions {std::get<std::string>(std::move(arguments.at(1)))});
+            }
+            if(takesOptions(name) && arguments.size() > 1) {
+              auto operand = toComputeExpression(std::move(arguments[0]), columns);
+              arguments.erase(arguments.begin());
+              return compute::call(name, {std::move(operand)},
+                                   functionOptions(name, std::move(arguments)));
+            }
+            // Arrow casts only int32 (not int64) day counts to date32
+            if(name == "date" && arguments.size() == 1 &&
+               std::holds_alternative<int32_t>(arguments[0]))
+              return compute::call("cast", {compute::literal(std::get<int32_t>(arguments[0]))},
+                                   compute::CastOptions::Unsafe(arrow::date32()));
             auto operands = std::vector<compute::Expression>();
-            for(auto const& arg : ce.getDynamicArguments()) {
-              auto expr = toComputeExpression(arg, columns);
+            for(auto& argument : arguments) {
               // auto-cast bare YYYY-MM-DD string literals to date32 in comparisons
-              auto* s = std::set<std::string_view> {"less",          "less_equal", "greater",
-                                                    "greater_equal", "equal",      "not_equal"}
-                                .count(name)
-                            ? std::get_if<std::string>(&arg)
-                            : nullptr;
-              operands.push_back(s && s->size() == 10 && (*s)[4] == '-' && (*s)[7] == '-'
-                                     ? compute::call("cast", {std::move(expr)},
+              auto isDateLiteral =
+                  std::set<std::string_view> {"less",          "less_equal", "greater",
+                                              "greater_equal", "equal",      "not_equal"}
+                      .count(name) &&
+                  std::holds_alternative<std::string>(argument) &&
+                  std::get<std::string>(argument).size() == 10 &&
+                  std::get<std::string>(argument)[4] == '-' &&
+                  std::get<std::string>(argument)[7] == '-';
+              auto operand = toComputeExpression(std::move(argument), columns);
+              operands.push_back(isDateLiteral
+                                     ? compute::call("cast", {std::move(operand)},
                                                      compute::CastOptions::Unsafe(arrow::date32()))
-                                     : std::move(expr));
+                                     : std::move(operand));
             }
             if(name == "int")
               return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::int32()));
+            else if(name == "int64")
+              return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::int64()));
+            // Divide is always floating-point; IntDivide keeps Arrow's type-preserving divide
+            else if(name == "divide") {
+              for(auto& operand : operands)
+                operand = compute::call("cast", {std::move(operand)},
+                                        compute::CastOptions::Safe(arrow::float64()));
+              return compute::call("divide", operands);
+            } else if(name == "intdivide")
+              return compute::call("divide", operands);
             else if(name == "date")
               return compute::call("cast", operands, compute::CastOptions::Unsafe(arrow::date32()));
             else if(name == "timestamp")
-              return compute::call(
-                  "cast", operands,
-                  compute::CastOptions::Unsafe(arrow::timestamp(arrow::TimeUnit::SECOND, "UTC")));
-            else if(name == "like")
-              return compute::call("match_like", {operands[0]},
-                                   compute::MatchSubstringOptions {
-                                       std::get<std::string>(ce.getDynamicArguments().at(1))});
-            else if(name == "match_substring")
-              return compute::call("match_substring", {operands[0]},
-                                   compute::MatchSubstringOptions {
-                                       std::get<std::string>(ce.getDynamicArguments().at(1))});
+              return compute::call("boss_to_timestamp", operands);
+            else if(name == "modulo")
+              return compute::call("boss_modulo", operands);
             else if(name == "bool")
               return compute::call("cast", operands,
                                    compute::CastOptions::Unsafe(arrow::boolean()));
@@ -266,14 +462,30 @@ static compute::Expression toComputeExpression(boss::Expression const& e,
             else if(operands.size() > 2 &&
                     (name == "and" || name == "or" || name == "add" || name == "multiply")) {
               auto result = compute::call(name, {operands[0], operands[1]});
-              for(size_t i = 2; i < operands.size(); ++i)
-                result = compute::call(name, {std::move(result), operands[i]});
+              for(auto const& operand : operands | std::views::drop(2))
+                result = compute::call(name, {std::move(result), operand});
               return result;
             } else
               return compute::call(name, operands);
           },
+          // integer literals are int64, matching the column type Table builds for them
+          [](int32_t v) { return compute::literal(static_cast<int64_t>(v)); },
+          // a table used as an operand, e.g. (ByName m), must have one row and one
+          // column; it stands for that value
+          [](int64_t v) {
+            if(!intermediates.intermediates.count(v))
+              return compute::literal(v);
+            auto table = intermediates.getTable(intermediates.at(v));
+            if(table->num_rows() != 1 || table->num_columns() != 1)
+              throw std::runtime_error(
+                  "a table used as a value inside an expression must have exactly one row and "
+                  "one column, but it has " +
+                  std::to_string(table->num_rows()) + " rows and " +
+                  std::to_string(table->num_columns()) + " columns");
+            return compute::literal(*table->column(0)->GetScalar(0));
+          },
           [](auto v) { return compute::literal(v); }),
-      e);
+      std::move(e));
 }
 
 template <typename T, typename F> static void withBuilder(F&& use) {
@@ -291,28 +503,514 @@ template <typename T, typename F> static void withBuilder(F&& use) {
     throw std::runtime_error("unsupported column type: " + std::string(typeid(T).name()));
 }
 
+// Compute functions the engine adds to Arrow's function registry. They cannot
+// be rewritten in toComputeExpression because what they do depends on the
+// operand types, which are only known when Acero binds the expression.
+namespace engineComputeFunctions {
+
+// Promotes numeric operands to a common type: float64 if any is floating,
+// otherwise int64. Non-numeric operands are left alone.
+class NumericPromotingFunction : public compute::ScalarFunction {
+public:
+  using compute::ScalarFunction::ScalarFunction;
+  arrow::Result<compute::Kernel const*>
+  DispatchBest(std::vector<arrow::TypeHolder>* values) const override {
+    auto anyFloating = std::any_of(values->begin(), values->end(), [](auto const& value) {
+      return arrow::is_floating(value.id());
+    });
+    for(auto& value : *values)
+      if(arrow::is_integer(value.id()) || arrow::is_floating(value.id()))
+        value = anyFloating ? arrow::float64() : arrow::int64();
+    return DispatchExact(*values);
+  }
+};
+
+static arrow::Status setKernelResult(arrow::Datum const& result, compute::ExecSpan const& batch,
+                                     compute::ExecResult* out) {
+  if(result.is_scalar()) {
+    ARROW_ASSIGN_OR_RAISE(auto array, arrow::MakeArrayFromScalar(*result.scalar(), batch.length));
+    out->value = array->data();
+  } else
+    out->value = result.array();
+  return arrow::Status::OK();
+}
+
+// Floored modulo: the result has the sign of the divisor, so (Modulo -7 5) is 3.
+template <bool isFloating>
+static arrow::Status moduloExec(compute::KernelContext*, compute::ExecSpan const& batch,
+                             compute::ExecResult* out) {
+  using compute::CallFunction;
+  auto arguments = batch.ToExecBatch().values;
+  auto const& x = arguments[0];
+  auto const& n = arguments[1];
+  if constexpr(isFloating) {
+    ARROW_ASSIGN_OR_RAISE(auto quotient, CallFunction("divide", {x, n}));
+    ARROW_ASSIGN_OR_RAISE(quotient, CallFunction("floor", {quotient}));
+    ARROW_ASSIGN_OR_RAISE(auto product, CallFunction("multiply", {n, quotient}));
+    ARROW_ASSIGN_OR_RAISE(auto remainder, CallFunction("subtract", {x, product}));
+    return setKernelResult(remainder, batch, out);
+  } else {
+    // integer divide truncates; shift remainders whose sign differs from n's
+    ARROW_ASSIGN_OR_RAISE(auto quotient, CallFunction("divide", {x, n}));
+    ARROW_ASSIGN_OR_RAISE(auto product, CallFunction("multiply", {n, quotient}));
+    ARROW_ASSIGN_OR_RAISE(auto remainder, CallFunction("subtract", {x, product}));
+    auto zero = arrow::Datum(int64_t(0));
+    ARROW_ASSIGN_OR_RAISE(auto nonZero, CallFunction("not_equal", {remainder, zero}));
+    ARROW_ASSIGN_OR_RAISE(auto remainderNegative, CallFunction("less", {remainder, zero}));
+    ARROW_ASSIGN_OR_RAISE(auto divisorNegative, CallFunction("less", {n, zero}));
+    ARROW_ASSIGN_OR_RAISE(auto signsDiffer,
+                          CallFunction("not_equal", {remainderNegative, divisorNegative}));
+    ARROW_ASSIGN_OR_RAISE(auto needsShift, CallFunction("and", {nonZero, signsDiffer}));
+    ARROW_ASSIGN_OR_RAISE(auto shifted, CallFunction("add", {remainder, n}));
+    ARROW_ASSIGN_OR_RAISE(auto result, CallFunction("if_else", {needsShift, shifted, remainder}));
+    return setKernelResult(result, batch, out);
+  }
+}
+
+// Casts to a UTC timestamp; numbers are seconds since 1970 (fractions are dropped).
+static arrow::Status toTimestampExec(compute::KernelContext*, compute::ExecSpan const& batch,
+                                     compute::ExecResult* out) {
+  auto input = batch.ToExecBatch().values[0];
+  if(arrow::is_floating(input.type()->id())) {
+    ARROW_ASSIGN_OR_RAISE(input,
+                          compute::Cast(input, compute::CastOptions::Unsafe(arrow::int64())));
+  }
+  ARROW_ASSIGN_OR_RAISE(auto result,
+                        compute::Cast(input, compute::CastOptions::Unsafe(arrow::timestamp(
+                                                 arrow::TimeUnit::SECOND, "UTC"))));
+  return setKernelResult(result, batch, out);
+}
+
+// The quantile of each list in a list column, as float64. Which quantile is
+// set by the function's QuantileOptions.
+struct QuantileState : compute::KernelState {
+  compute::QuantileOptions options;
+  explicit QuantileState(compute::QuantileOptions options) : options(std::move(options)) {}
+};
+
+static arrow::Status listQuantileExec(compute::KernelContext* context,
+                                      compute::ExecSpan const& batch, compute::ExecResult* out) {
+  auto input = batch.ToExecBatch().values[0];
+  ARROW_ASSIGN_OR_RAISE(auto lists, input.is_scalar()
+                                        ? arrow::MakeArrayFromScalar(*input.scalar(), batch.length)
+                                        : arrow::Result<std::shared_ptr<arrow::Array>>(input.make_array()));
+  auto const& listArray = static_cast<arrow::ListArray const&>(*lists);
+  auto builder = arrow::DoubleBuilder();
+  for(auto row : std::views::iota(int64_t(0), listArray.length())) {
+    if(listArray.IsNull(row)) {
+      ARROW_RETURN_NOT_OK(builder.AppendNull());
+    } else {
+      ARROW_ASSIGN_OR_RAISE(
+          auto quantiles,
+          compute::CallFunction("quantile", {listArray.value_slice(row)},
+                                &static_cast<QuantileState*>(context->state())->options));
+      ARROW_ASSIGN_OR_RAISE(quantiles, compute::Cast(quantiles, arrow::float64()));
+      auto values = std::static_pointer_cast<arrow::DoubleArray>(quantiles.make_array());
+      ARROW_RETURN_NOT_OK(values->length() > 0 && values->IsValid(0)
+                              ? builder.Append(values->Value(0))
+                              : builder.AppendNull());
+    }
+  }
+  ARROW_ASSIGN_OR_RAISE(auto result, builder.Finish());
+  out->value = result->data();
+  return arrow::Status::OK();
+}
+
+// Collects all values of a column into one list. Arrow only provides the
+// grouped version (hash_list), so this is registered when "list" is missing.
+struct ListState : compute::KernelState {
+  std::shared_ptr<arrow::DataType> type;
+  arrow::ArrayVector values;
+};
+
+static arrow::Status listConsume(compute::KernelContext* context, compute::ExecSpan const& batch) {
+  auto input = batch.ToExecBatch().values[0];
+  ARROW_ASSIGN_OR_RAISE(auto values, input.is_scalar()
+                                         ? arrow::MakeArrayFromScalar(*input.scalar(), batch.length)
+                                         : arrow::Result<std::shared_ptr<arrow::Array>>(input.make_array()));
+  static_cast<ListState*>(context->state())->values.push_back(std::move(values));
+  return arrow::Status::OK();
+}
+
+static arrow::Status listMerge(compute::KernelContext*, compute::KernelState&& source,
+                               compute::KernelState* destination) {
+  auto& from = static_cast<ListState&>(source).values;
+  auto& to = static_cast<ListState*>(destination)->values;
+  to.insert(to.end(), std::make_move_iterator(from.begin()), std::make_move_iterator(from.end()));
+  return arrow::Status::OK();
+}
+
+static arrow::Status listFinalize(compute::KernelContext* context, arrow::Datum* out) {
+  auto* state = static_cast<ListState*>(context->state());
+  ARROW_ASSIGN_OR_RAISE(auto values, state->values.empty() ? arrow::MakeEmptyArray(state->type)
+                                                           : arrow::Concatenate(state->values));
+  *out = arrow::Datum(std::make_shared<arrow::ListScalar>(std::move(values)));
+  return arrow::Status::OK();
+}
+
+static bool registerAll() {
+  auto addKernel = [](compute::ScalarFunction& function, std::vector<compute::InputType> inputs,
+                      compute::OutputType output, compute::ArrayKernelExec exec,
+                      compute::KernelInit init = nullptr) {
+    auto kernel = compute::ScalarKernel(std::move(inputs), std::move(output), exec, std::move(init));
+    kernel.null_handling = compute::NullHandling::COMPUTED_NO_PREALLOCATE;
+    kernel.mem_allocation = compute::MemAllocation::NO_PREALLOCATE;
+    if(auto status = function.AddKernel(std::move(kernel)); !status.ok())
+      throw std::runtime_error(status.ToString());
+  };
+  auto modulo = std::make_shared<NumericPromotingFunction>(
+      "boss_modulo", compute::Arity::Binary(),
+      compute::FunctionDoc {"Floored modulo", "Result takes the sign of the divisor", {"x", "n"}});
+  addKernel(*modulo, {arrow::int64(), arrow::int64()}, arrow::int64(), moduloExec<false>);
+  addKernel(*modulo, {arrow::float64(), arrow::float64()}, arrow::float64(), moduloExec<true>);
+
+  auto toTimestamp = std::make_shared<NumericPromotingFunction>(
+      "boss_to_timestamp", compute::Arity::Unary(),
+      compute::FunctionDoc {"Cast to timestamp[s, UTC]",
+                            "Numbers are seconds since 1970; dates and strings are cast directly",
+                            {"x"}});
+  auto timestampType = arrow::timestamp(arrow::TimeUnit::SECOND, "UTC");
+  for(auto input : {compute::InputType(arrow::int64()), compute::InputType(arrow::float64()),
+                    compute::InputType(arrow::Type::DATE32), compute::InputType(arrow::Type::DATE64),
+                    compute::InputType(arrow::Type::STRING),
+                    compute::InputType(arrow::Type::TIMESTAMP)})
+    addKernel(*toTimestamp, {input}, timestampType, toTimestampExec);
+
+  static auto const defaultQuantileOptions = compute::QuantileOptions();
+  auto listQuantile = std::make_shared<compute::ScalarFunction>(
+      "boss_list_quantile", compute::Arity::Unary(),
+      compute::FunctionDoc {"Exact quantile of each list", "Arrow's quantile kernel per list",
+                            {"lists"}, "QuantileOptions"},
+      &defaultQuantileOptions);
+  addKernel(*listQuantile, {compute::InputType(arrow::Type::LIST)}, arrow::float64(),
+            listQuantileExec,
+            [](compute::KernelContext*, compute::KernelInitArgs const& arguments)
+                -> arrow::Result<std::unique_ptr<compute::KernelState>> {
+              return std::make_unique<QuantileState>(
+                  static_cast<compute::QuantileOptions const&>(*arguments.options));
+            });
+
+  auto* registry = compute::GetFunctionRegistry();
+  for(auto function :
+      std::vector<std::shared_ptr<compute::Function>> {modulo, toTimestamp, listQuantile})
+    if(auto status = registry->AddFunction(function); !status.ok())
+      throw std::runtime_error(status.ToString());
+
+  if(!registry->GetFunction("list").ok()) {
+    auto list = std::make_shared<compute::ScalarAggregateFunction>(
+        "list", compute::Arity::Unary(),
+        compute::FunctionDoc {"Collect all values into one list", "", {"values"}});
+    auto status = list->AddKernel(compute::ScalarAggregateKernel(
+        {compute::InputType::Any()},
+        compute::OutputType([](compute::KernelContext*, std::vector<arrow::TypeHolder> const& types)
+                                -> arrow::Result<arrow::TypeHolder> {
+          return arrow::TypeHolder(arrow::list(types[0].GetSharedPtr()));
+        }),
+        [](compute::KernelContext*, compute::KernelInitArgs const& arguments)
+            -> arrow::Result<std::unique_ptr<compute::KernelState>> {
+          auto state = std::make_unique<ListState>();
+          state->type = arguments.inputs[0].GetSharedPtr();
+          return state;
+        },
+        listConsume, listMerge, listFinalize, /*ordered=*/false));
+    if(status.ok())
+      status = registry->AddFunction(list);
+    if(!status.ok())
+      throw std::runtime_error(status.ToString());
+  }
+  return true;
+}
+
+} // namespace engineComputeFunctions
+
+// Plans the aggregation of GroupBy and Resample. The arguments in
+// [first, last) are aggregates, such as (Sum col), and key columns. The
+// output has the key columns first, then one column per aggregate.
+// Median and Quantile have no Acero kernel: they collect each group's values
+// into a list, and the projection after the aggregation takes the quantile of
+// each list. Inside the plan, aggregates are named by their position so that
+// two aggregates with the same name stay apart.
+static Declaration aggregation(Declaration input, boss::ExpressionArguments::iterator first,
+                               boss::ExpressionArguments::iterator last) {
+  auto aggregates = std::vector<compute::Aggregate>();
+  auto keys = std::vector<FieldRef>();
+  auto projections = std::vector<compute::Expression>();
+  auto names = std::vector<std::string>();
+  auto add = [&](std::string function, std::string columnName, std::string name,
+                 std::shared_ptr<compute::QuantileOptions> quantile = nullptr) {
+    auto position = std::to_string(aggregates.size());
+    if(columnName.empty())
+      aggregates.emplace_back(std::move(function), position);
+    else
+      aggregates.push_back({std::move(function), std::move(columnName), position});
+    projections.push_back(quantile ? compute::call("boss_list_quantile",
+                                                   {compute::field_ref(position)}, quantile)
+                                   : compute::field_ref(position));
+    names.push_back(std::move(name));
+    return true;
+  };
+  auto quantile = [&](auto, auto arguments, auto) {
+    auto columnName = std::get<Symbol>(arguments[0]).getName();
+    auto options = std::make_shared<compute::QuantileOptions>(
+        numberArgument(arguments, 1, "Quantile", "a fraction q"));
+    if(arguments.size() == 3)
+      options->interpolation = interpolation(std::get<Symbol>(arguments[2]).getName());
+    return add("list", columnName, "quantile(" + columnName + ")", std::move(options));
+  };
+  for(auto& argument : std::ranges::subrange(first, last)) {
+    if(std::holds_alternative<Symbol>(argument)) {
+      auto key = std::get<Symbol>(argument).getName();
+      projections.insert(projections.begin() + keys.size(), compute::field_ref(key));
+      names.insert(names.begin() + keys.size(), key);
+      keys.emplace_back(key);
+    } else {
+      boss::Expression added =
+          std::move(argument) < "Median"_(Symbol_) > [&](auto, auto arguments, auto) {
+            auto columnName = std::get<Symbol>(arguments[0]).getName();
+            return add("list", columnName, "median(" + columnName + ")",
+                       std::make_shared<compute::QuantileOptions>(0.5));
+          } < "Quantile"_(Symbol_, Any_) > quantile < "Quantile"_(Symbol_, Any_, Symbol_) >
+          quantile < "Quantile"_(AnySequence_) > [](auto, auto, auto) -> bool {
+            throw std::runtime_error(
+                "Quantile expects (Quantile col q [Linear|Lower|Higher|Nearest|Midpoint])");
+          } < "CountAll"_() > [&](auto, auto, auto) {
+            return add("count_all", "", "count_all()");
+          } < Any_ > [&](Symbol head, auto, auto arguments, auto) {
+            auto columnName = aggregateColumn(head, arguments);
+            auto function = toArrowName(head.getName());
+            return add(function, columnName, function + "(" + columnName + ")");
+          };
+      if(!std::holds_alternative<bool>(added))
+        throw std::runtime_error(
+            "GroupBy expects aggregates like (Sum col) followed by key columns");
+    }
+  }
+  if(!keys.empty())
+    for(auto& aggregate : aggregates)
+      aggregate.function = "hash_" + aggregate.function;
+  return Declaration::Sequence({std::move(input),
+                                {"aggregate", AggregateNodeOptions(aggregates, keys)},
+                                {"project", ProjectNodeOptions(projections, names)}});
+}
+
+// Range, Window and ExponentialMovingAverage. Like Cumulate and Pairwise, they
+// are computed directly on materialized columns, in row order, instead of
+// being planned with Acero.
+
+// One contiguous float64 array holding the named column.
+static std::shared_ptr<arrow::DoubleArray> doubleColumn(arrow::Table const& table,
+                                                        std::string const& columnName) {
+  auto column = table.GetColumnByName(columnName);
+  if(!column)
+    throw std::runtime_error("no column named '" + columnName + "'");
+  auto values = orThrow(arrow::Concatenate(column->chunks()));
+  if(values->type_id() != arrow::Type::DOUBLE)
+    values = orThrow(compute::Cast(*values, arrow::float64()));
+  return std::static_pointer_cast<arrow::DoubleArray>(values);
+}
+
+static std::shared_ptr<arrow::Table> appendColumn(std::shared_ptr<arrow::Table> const& table,
+                                                  std::string const& name,
+                                                  std::shared_ptr<arrow::Array> const& array) {
+  return orThrow(table->AddColumn(table->num_columns(), arrow::field(name, array->type()),
+                                  std::make_shared<arrow::ChunkedArray>(array)));
+}
+
+// Evenly spaced values from start to stop (inclusive when hit exactly).
+static std::shared_ptr<arrow::Array> range(double_t start, double_t stop, double_t step,
+                                           bool integral) {
+  if(step <= 0)
+    throw std::runtime_error("Range step must be positive");
+  auto count = stop < start ? 0 : static_cast<int64_t>(std::floor((stop - start) / step + 1e-9)) + 1;
+  if(integral) {
+    auto builder = arrow::Int64Builder();
+    for(auto i : std::views::iota(int64_t(0), count))
+      (void)builder.Append(static_cast<int64_t>(start) + i * static_cast<int64_t>(step));
+    return *builder.Finish();
+  }
+  auto builder = arrow::DoubleBuilder();
+  for(auto i : std::views::iota(int64_t(0), count))
+    (void)builder.Append(start + i * step);
+  return *builder.Finish();
+}
+
+// The aggregate of each row and the size - 1 rows before it, ignoring nulls.
+// The first size - 1 rows are null, or, if partial is set, the aggregate of
+// the rows available. Sum, Mean and Count keep running totals; Min and Max
+// keep the candidate rows in a deque ordered by value.
+static std::shared_ptr<arrow::Array> window(arrow::DoubleArray const& values,
+                                            std::string const& function, int64_t size,
+                                            bool partial) {
+  auto sum = 0.0;
+  auto count = int64_t(0);
+  auto deque = std::deque<int64_t>(); // rows that can still be the window's Min or Max
+  auto better = [&](double_t a, double_t b) { return function == "min" ? a <= b : a >= b; };
+  auto counts = arrow::Int64Builder();
+  auto results = arrow::DoubleBuilder();
+  for(auto i : std::views::iota(int64_t(0), values.length())) {
+    if(values.IsValid(i)) {
+      sum += values.Value(i);
+      ++count;
+      while(!deque.empty() && better(values.Value(i), values.Value(deque.back())))
+        deque.pop_back();
+      deque.push_back(i);
+    }
+    if(i >= size && values.IsValid(i - size)) {
+      sum -= values.Value(i - size);
+      --count;
+    }
+    while(!deque.empty() && deque.front() <= i - size)
+      deque.pop_front();
+    if(i + 1 < size && !partial) {
+      (void)counts.AppendNull();
+      (void)results.AppendNull();
+    } else if(function == "count")
+      (void)counts.Append(count);
+    else if(count == 0)
+      (void)results.AppendNull();
+    else if(function == "sum")
+      (void)results.Append(sum);
+    else if(function == "mean")
+      (void)results.Append(sum / count);
+    else
+      (void)results.Append(values.Value(deque.front()));
+  }
+  return function == "count" ? *counts.Finish() : *results.Finish();
+}
+
+// The exponential moving average of values: starting from 0, each row moves
+// the average towards its value by the fraction alpha. Null rows keep the
+// previous average.
+static std::shared_ptr<arrow::Array> exponentialMovingAverage(arrow::DoubleArray const& values,
+                                                              double_t alpha) {
+  auto builder = arrow::DoubleBuilder();
+  auto state = 0.0;
+  for(auto value : values) {
+    if(value)
+      state += alpha * (*value - state);
+    (void)builder.Append(state);
+  }
+  return *builder.Finish();
+}
+
+// (Window table aggregate… size [Partial]): appends one column per aggregate.
+static boss::Expression windowOperator(boss::ExpressionArguments&& arguments, bool partial) {
+  auto sizeIndex = arguments.size() - (partial ? 2 : 1);
+  auto size = static_cast<int64_t>(numberArgument(arguments, sizeIndex, "Window", "a size"));
+  if(size < 1)
+    throw std::runtime_error("Window size must be at least 1");
+  auto input = intermediates.getTable(intermediates.at(arguments[0]));
+  auto table = input;
+  auto windowed = [&](std::string function) {
+    return [&, function](auto, auto aggregateArguments, auto) {
+      auto columnName = std::get<Symbol>(aggregateArguments[0]).getName();
+      table = appendColumn(table, function + "(" + columnName + ")",
+                           window(*doubleColumn(*input, columnName), function, size, partial));
+      return true;
+    };
+  };
+  for(auto& aggregate : arguments | std::views::drop(1) | std::views::take(sizeIndex - 1)) {
+    boss::Expression appended = std::move(aggregate) < "Sum"_(Symbol_) > windowed("sum") <
+                                "Mean"_(Symbol_) > windowed("mean") < "Min"_(Symbol_) >
+                                windowed("min") < "Max"_(Symbol_) > windowed("max") <
+                                "Count"_(Symbol_) > windowed("count");
+    if(!std::holds_alternative<bool>(appended))
+      throw std::runtime_error(
+          "Window supports (Sum col), (Mean col), (Min col), (Max col) and (Count col)");
+  }
+  return intermediates.putTable(table);
+}
+
+// (ExponentialMovingAverage table col …): appends exponential_moving_average(col).
+static boss::Expression exponentialMovingAverageOperator(boss::ExpressionArguments&& arguments,
+                                                         double_t alpha) {
+  auto table = intermediates.getTable(intermediates.at(arguments[0]));
+  auto columnName = std::get<Symbol>(arguments[1]).getName();
+  return intermediates.putTable(
+      appendColumn(table, "exponential_moving_average(" + columnName + ")",
+                   exponentialMovingAverage(*doubleColumn(*table, columnName), alpha)));
+}
+
+// (Resample table key aggregate… step): aggregates by key, then left-joins
+// every key from the smallest to the largest, in steps of step, with the
+// result. Aggregates of keys without rows are set to fill.
+static boss::Expression resampleOperator(boss::ExpressionArguments&& arguments,
+                                         boss::Expression&& fill) {
+  auto step = numberArgument(arguments, arguments.size() - 1, "Resample", "a step");
+  auto keyName = std::get<Symbol>(arguments[1]).getName();
+  // the aggregation's columns: the key (position 0), then the aggregates
+  auto aggregated = intermediates.getTable(
+      aggregation(intermediates.at(arguments[0]), arguments.begin() + 1, arguments.end() - 1));
+  auto extremes = orThrow(compute::CallFunction("min_max", {aggregated->column(0)}))
+                      .scalar_as<arrow::StructScalar>();
+  auto keyValue = [&](int index) {
+    return extremes.value[index]->is_valid
+               ? std::static_pointer_cast<arrow::DoubleScalar>(
+                     orThrow(extremes.value[index]->CastTo(arrow::float64())))
+                     ->value
+               : 0.0;
+  };
+  auto keys = range(keyValue(0), extremes.value[0]->is_valid ? keyValue(1) : -1.0, step,
+                    arrow::is_integer(aggregated->field(0)->type()->id()) &&
+                        step == std::floor(step));
+  auto fillScalar = std::visit(
+      [](auto&& value) -> std::shared_ptr<arrow::Scalar> {
+        using Value = std::decay_t<decltype(value)>;
+        if constexpr(std::is_same_v<Value, int32_t>)
+          return arrow::MakeScalar(static_cast<int64_t>(value));
+        else if constexpr(std::is_arithmetic_v<Value>)
+          return arrow::MakeScalar(value);
+        else
+          throw std::runtime_error("Resample fill value must be a number");
+      },
+      std::move(fill));
+  auto rightSide = std::vector<compute::Expression> {
+      compute::call("cast", {compute::field_ref(0)}, compute::CastOptions::Safe(keys->type()))};
+  auto aggregateOutputs = std::vector<FieldRef>();
+  auto filled = std::vector<compute::Expression> {compute::field_ref(0)};
+  for(auto i : std::views::iota(1, aggregated->num_columns())) {
+    rightSide.push_back(compute::field_ref(i));
+    aggregateOutputs.emplace_back(i);
+    filled.push_back(compute::call(
+        "coalesce", {compute::field_ref(i),
+                     compute::literal(orThrow(fillScalar->CastTo(aggregated->field(i)->type())))}));
+  }
+  return intermediates.put(Declaration::Sequence(
+      {{"hashjoin",
+        {Declaration {"table_source",
+                      TableSourceNodeOptions(arrow::Table::Make(
+                          arrow::schema({arrow::field(keyName, keys->type())}), {keys}))},
+         Declaration::Sequence({{"table_source", TableSourceNodeOptions(aggregated)},
+                                {"project", ProjectNodeOptions(rightSide, aggregated->ColumnNames())}})},
+        HashJoinNodeOptions(JoinType::LEFT_OUTER, {FieldRef(0)}, {FieldRef(0)}, {FieldRef(0)},
+                            aggregateOutputs, compute::literal(true), "_l", "_r")},
+       {"order_by", OrderByNodeOptions(Ordering({compute::SortKey(FieldRef(0))}))},
+       {"project", ProjectNodeOptions(filled, aggregated->ColumnNames())}}));
+}
+
 static boss::Expression buildJoin(JoinType joinType,
                                   boss::expressions::ExpressionArguments& dynamics) {
   auto leftKeys = std::vector<FieldRef>(), rightKeys = std::vector<FieldRef>();
-  auto& left = dynamics.at(0);
-  auto& right = dynamics.at(1);
-  auto cols = intermediates.columnNames(left);
-  auto rightCols = intermediates.columnNames(right);
+  auto cols = intermediates.columnNames(dynamics.at(0));
+  auto rightCols = intermediates.columnNames(dynamics.at(1));
   cols.insert(rightCols.begin(), rightCols.end());
-  auto filterExprs = std::vector<compute::Expression>();
-  for(auto i = 2u; i < dynamics.size(); ++i) {
-    auto const& ce = get<ComplexExpression>(dynamics.at(i));
-    if(ce.getHead().getName() == "Equal") {
-      auto const& args = ce.getDynamicArguments();
-      leftKeys.push_back(get<Symbol>(args.at(0)).getName());
-      rightKeys.push_back(get<Symbol>(args.at(1)).getName());
-    } else {
-      filterExprs.push_back(toComputeExpression(dynamics.at(i), cols));
+  // (Equal lCol rCol) is an equi-join key; any other predicate is a residual filter
+  auto filter = compute::Expression();
+  for(auto& condition : dynamics | std::views::drop(2)) {
+    boss::Expression residual =
+        std::move(condition) < "Equal"_(Symbol_, Symbol_) > [&](auto, auto arguments, auto) {
+          leftKeys.emplace_back(std::get<Symbol>(arguments[0]).getName());
+          rightKeys.emplace_back(std::get<Symbol>(arguments[1]).getName());
+          return true;
+        };
+    if(!std::holds_alternative<bool>(residual)) {
+      auto predicate = toComputeExpression(std::move(residual), cols);
+      filter = filter.is_valid() ? compute::call("and", {std::move(filter), std::move(predicate)})
+                                 : std::move(predicate);
     }
   }
-  compute::Expression filter = filterExprs.empty() ? literal(true) : filterExprs[0];
-  for(auto i = 1u; i < filterExprs.size(); ++i)
-    filter = compute::call("and", {filter, filterExprs[i]});
+  if(!filter.is_valid())
+    filter = literal(true);
   if(leftKeys.empty()) {
     const std::string dummyKey = "__cross_join_key__";
     auto addDummy = [&](Declaration src, std::vector<std::string> const& fields) {
@@ -324,49 +1022,59 @@ static boss::Expression buildJoin(JoinType joinType,
       names.push_back(dummyKey);
       return Declaration::Sequence({std::move(src), {"project", ProjectNodeOptions(exprs, names)}});
     };
-    auto leftFields = intermediates.getTable(intermediates.at(left))->schema()->field_names();
-    auto rightFields = intermediates.getTable(intermediates.at(right))->schema()->field_names();
+    auto leftFields = intermediates.getTable(intermediates.at(dynamics[0]))->schema()->field_names();
+    auto rightFields = intermediates.getTable(intermediates.at(dynamics[1]))->schema()->field_names();
     auto leftOutput = std::vector<FieldRef>(leftFields.begin(), leftFields.end());
     auto rightOutput = std::vector<FieldRef>(rightFields.begin(), rightFields.end());
     return boss::Expression {intermediates.put(
         {"hashjoin",
-         {addDummy(intermediates.at(left), leftFields),
-          addDummy(intermediates.at(right), rightFields)},
+         {addDummy(intermediates.at(dynamics[0]), leftFields),
+          addDummy(intermediates.at(dynamics[1]), rightFields)},
          HashJoinNodeOptions(joinType, {FieldRef(dummyKey)}, {FieldRef(dummyKey)}, leftOutput,
                              rightOutput, filter, "_l", "_r", true)})};
   }
   return boss::Expression {intermediates.put(
       {"hashjoin",
-       {intermediates.at(left), intermediates.at(right)},
+       {intermediates.at(dynamics[0]), intermediates.at(dynamics[1])},
        HashJoinNodeOptions(joinType, leftKeys, rightKeys, filter, "_l", "_r", true)})};
 }
 
 static boss::Expression evaluate(boss::Expression&& e) {
-  using boss::utilities::experimental::sentinel::Any_;
-  using boss::utilities::experimental::sentinel::AnySequence_;
   static auto _ = compute::Initialize();
+  static auto registered = engineComputeFunctions::registerAll();
   return std::move(e) //
-         <"Slice"_(AnySequence_) >= Description("Fetch a contiguous slice of rows")>
+         <"Slice"_(Any_, Integer_, Integer_) >= Description("Fetch a contiguous slice of rows")>
              Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            return intermediates.put(Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
-                {"fetch", FetchNodeOptions(get<int>(dynamics.at(1)), get<int>(dynamics.at(2)))}}));
-         } < "OrderBy"_(AnySequence_) >=
+                {"fetch", FetchNodeOptions(
+                              static_cast<int64_t>(numberArgument(dynamics, 1, "Slice", "an offset")),
+                              static_cast<int64_t>(numberArgument(dynamics, 2, "Slice", "a count")))}}));
+         } < "OrderBy"_(Any_, Any_) >=
          Description("Sort rows by one or more columns; wrap a column in (Desc "
                      "col) to sort descending") > Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            auto orderKeys = std::vector<compute::SortKey>();
-           for(auto& it : get<ComplexExpression>(dynamics.at(1)).getDynamicArguments()) {
-             auto* sym = std::get_if<Symbol>(&it);
-             if(sym) {
-               orderKeys.push_back(compute::SortKey(sym->getName()));
+           auto sortKey = [&](compute::SortOrder order) {
+             return [&, order](auto, auto arguments, auto) {
+               orderKeys.emplace_back(std::get<Symbol>(arguments[0]).getName(), order);
+               return true;
+             };
+           };
+           if(!std::holds_alternative<ComplexExpression>(dynamics[1]))
+             throw std::runtime_error("OrderBy expects a key list like (keys col …)");
+           auto [listHead, listStatics, keys, listSpans] =
+               std::get<ComplexExpression>(std::move(dynamics[1])).decompose();
+           for(auto& key : keys) {
+             if(std::holds_alternative<Symbol>(key)) {
+               orderKeys.emplace_back(std::get<Symbol>(key).getName());
              } else {
-               auto const& ce = get<ComplexExpression>(it);
-               orderKeys.push_back(compute::SortKey(
-                   get<Symbol>(ce.getDynamicArguments().at(0)).getName(),
-                   ce.getHead().getName() == "Desc" ? compute::SortOrder::Descending
-                                                    : compute::SortOrder::Ascending));
+               boss::Expression added =
+                   std::move(key) < "Desc"_(Symbol_) > sortKey(compute::SortOrder::Descending) <
+                   "Asc"_(Symbol_) > sortKey(compute::SortOrder::Ascending);
+               if(!std::holds_alternative<bool>(added))
+                 throw std::runtime_error("OrderBy keys are columns, (Asc col) or (Desc col)");
              }
            }
            return intermediates.put(
@@ -388,8 +1096,9 @@ static boss::Expression evaluate(boss::Expression&& e) {
          [](auto, auto dynamics, auto) { return buildJoin(JoinType::LEFT_ANTI, dynamics); } <
          "Union"_(AnySequence_) >=
          Description("Concatenate two or more tables (bag union, like SQL UNION ALL); "
-                     "schemas are unified across inputs, with columns absent from a "
-                     "given input filled with nulls; rows appear in input order") >
+                     "schemas are unified across inputs, numeric columns are widened to a "
+                     "common type, and columns absent from a given input are filled with "
+                     "nulls; rows appear in input order") >
          Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            auto tables = std::vector<std::shared_ptr<arrow::Table>>();
@@ -397,15 +1106,19 @@ static boss::Expression evaluate(boss::Expression&& e) {
              tables.push_back(intermediates.getTable(intermediates.at(key)));
            arrow::ConcatenateTablesOptions concatOptions;
            concatOptions.unify_schemas = true;
+           concatOptions.field_merge_options = arrow::Field::MergeOptions::Permissive();
            auto maybeTable = arrow::ConcatenateTables(tables, concatOptions);
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
          } < "Name"_(AnySequence_) >=
-         Description("Store a table under a named handle for later retrieval") > Recurse(evaluate) >
+         Description("Store a table under a named handle for later retrieval") >
+             Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            return intermediates.name(std::move(dynamics.at(0)), get<boss::Symbol>(dynamics.at(1)));
-         } < "ByName"_(AnySequence_) >= Description("Retrieve a previously named table") >
+         } < "ByName"_(AnySequence_) >=
+         Description("Retrieve a previously named table; inside an expression, a "
+                     "one-row, one-column table stands for its value") >
          Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            return intermediates.byName(get<boss::Symbol>(dynamics.at(0)));
@@ -417,7 +1130,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
            auto columns = intermediates.columnNames(dynamics.at(0));
            return intermediates.put(Declaration::Sequence(
                {intermediates.at(dynamics.at(0)),
-                {"filter", FilterNodeOptions(toComputeExpression(dynamics.at(1), columns))}}));
+                {"filter",
+                 FilterNodeOptions(toComputeExpression(std::move(dynamics.at(1)), columns))}}));
          } < "Project"_(AnySequence_) >=
          Description("Select and rename columns; supports (As expr newName) "
                      "aliasing, (As (Int "
@@ -428,88 +1142,59 @@ static boss::Expression evaluate(boss::Expression&& e) {
            auto columns = intermediates.columnNames(dynamics.at(0));
            auto projections = std::vector<compute::Expression>();
            auto names = std::vector<std::string>();
-           for(auto i = 1; i < dynamics.size(); i++)
-             visit(boss::utilities::overload(
-                       [&](Symbol&& s) {
-                         projections.push_back(compute::field_ref(s.getName()));
-                         names.push_back(s.getName());
-                       },
-                       [&](ComplexExpression&& s) {
-                         if(s.getHead().getName() == "As") {
-                           auto const& args = s.getDynamicArguments();
-                           projections.push_back(toComputeExpression(args.at(0), columns));
-                           names.push_back(get<Symbol>(args.at(1)).getName());
-                         } else {
-                           auto expr =
-                               toComputeExpression(boss::Expression {std::move(s)}, columns);
-                           projections.push_back(expr);
-                           names.push_back(expr.ToString());
-                         }
-                       },
-                       [](auto&&) {}),
-                   std::move(dynamics.at(i)));
+           for(auto& projection : dynamics | std::views::drop(1)) {
+             if(std::holds_alternative<Symbol>(projection)) {
+               projections.push_back(compute::field_ref(std::get<Symbol>(projection).getName()));
+               names.push_back(std::get<Symbol>(projection).getName());
+             } else {
+               boss::Expression unaliased =
+                   std::move(projection) < "As"_(Any_, Symbol_) > [&](auto, auto arguments, auto) {
+                     projections.push_back(toComputeExpression(std::move(arguments[0]), columns));
+                     names.push_back(std::get<Symbol>(arguments[1]).getName());
+                     return true;
+                   };
+               // any other expression is a computed column named after itself
+               if(std::holds_alternative<ComplexExpression>(unaliased)) {
+                 projections.push_back(toComputeExpression(std::move(unaliased), columns));
+                 names.push_back(projections.back().ToString());
+               }
+             }
+           }
            return intermediates.put(
                Declaration::Sequence({intermediates.at(dynamics.at(0)),
                                       {"project", ProjectNodeOptions(projections, names)}}));
-         } < "GroupBy"_(AnySequence_) >=
-         Description("Aggregate a column (Sum, Mean, Max, CountAll, ...). "
-                     "Without keys: global "
-                     "aggregate; with keys: hash-aggregate") > Recurse(evaluate) >
+         } < "GroupBy"_(Any_, AnySequence_) >=
+         Description("Aggregate a column (Sum, Mean, Max, CountAll, Median, "
+                     "Quantile, ...). Without keys: global aggregate; with keys: "
+                     "hash-aggregate") > Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           auto aggregates = std::vector<compute::Aggregate>();
-           auto keys = std::vector<FieldRef>();
-           auto i = 1u;
-           for(; i < dynamics.size() && std::holds_alternative<ComplexExpression>(dynamics.at(i));
-               ++i) {
-             auto const& fn = get<ComplexExpression>(dynamics.at(i));
-             auto const& args = fn.getDynamicArguments();
-             auto const functionName = toArrowName(fn.getHead().getName());
-             if(args.empty()) {
-               aggregates.emplace_back(functionName, functionName + "()");
-             } else {
-               auto const col = get<Symbol>(args.at(0));
-               aggregates.push_back(
-                   {functionName, col.getName(), functionName + "(" + col.getName() + ")"});
-             }
-           }
-           for(; i < dynamics.size(); ++i)
-             keys.push_back(get<Symbol>(dynamics.at(i)).getName());
-           if(!keys.empty())
-             for(auto& agg : aggregates)
-               agg.function = "hash_" + agg.function;
-           auto aggDecl =
-               Declaration::Sequence({intermediates.at(dynamics.at(0)),
-                                      {"aggregate", AggregateNodeOptions(aggregates, keys)}});
-           if(!keys.empty()) {
-             auto maybeTable = DeclarationToTable(aggDecl, false);
-             if(!maybeTable.ok())
-               return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
-             return boss::Expression {intermediates.putTable(*maybeTable)};
-           }
-           return boss::Expression {intermediates.put(std::move(aggDecl))};
-         } < "Cumulate"_(AnySequence_) >=
+           auto keyed = std::any_of(dynamics.begin() + 1, dynamics.end(), [](auto const& argument) {
+             return std::holds_alternative<Symbol>(argument);
+           });
+           auto plan = aggregation(intermediates.at(dynamics[0]), dynamics.begin() + 1, dynamics.end());
+           // hash aggregates are materialized right away; global ones stay lazy
+           return keyed ? intermediates.putTable(intermediates.getTable(std::move(plan)))
+                        : intermediates.put(std::move(plan));
+         } < "Cumulate"_(Any_, Any_) >=
          Description("Running (prefix) aggregate, e.g. cumulative sum") > Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
-           auto const& aggregationFunction = get<ComplexExpression>(dynamics.at(1));
-           auto const aggregationAttribute =
-               get<Symbol>(aggregationFunction.getDynamicArguments().at(0));
-           auto const functionName = toArrowName(aggregationFunction.getHead().getName());
-           auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
-           auto maybeResult =
-               compute::CallFunction("cumulative_" + functionName,
-                                     {input->GetColumnByName(aggregationAttribute.getName())});
-           if(!maybeResult.ok())
-             return boss::Expression {maybeResult.status().ToStringWithoutContextLines()};
-           auto result = maybeResult->chunked_array();
-           auto maybeTable = input->AddColumn(
-               input->num_columns(),
-               field(functionName + "(" + aggregationAttribute.getName() + ")", result->type()),
-               result);
-           if(!maybeTable.ok())
-             return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
-           return boss::Expression {intermediates.putTable(*maybeTable)};
+           if(!std::holds_alternative<ComplexExpression>(dynamics[1]))
+             throw std::runtime_error("Cumulate expects an aggregate like (Sum col)");
+           auto [head, statics, arguments, spans] =
+               std::get<ComplexExpression>(std::move(dynamics[1])).decompose();
+           auto columnName = aggregateColumn(head, arguments);
+           auto function = toArrowName(head.getName());
+           auto input = intermediates.getTable(intermediates.at(dynamics[0]));
+           auto result = orThrow(compute::CallFunction("cumulative_" + function,
+                                                       {input->GetColumnByName(columnName)}))
+                             .chunked_array();
+           return intermediates.putTable(orThrow(input->AddColumn(
+               input->num_columns(), field(function + "(" + columnName + ")", result->type()),
+               result)));
          } < "Pairwise"_(AnySequence_) >=
-         Description("Sliding-window difference: out[i] = in[i+lag] - in[i]") > Recurse(evaluate) >
+         Description("Difference between each row and the row lag rows before it; "
+                     "the first lag rows are null") >
+             Recurse(evaluate) >
          [](auto, auto dynamics, auto) {
            auto options = compute::PairwiseOptions(get<int>(dynamics.at(3)));
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
@@ -535,6 +1220,55 @@ static boss::Expression evaluate(boss::Expression&& e) {
            if(!maybeTable.ok())
              return boss::Expression {maybeTable.status().ToStringWithoutContextLines()};
            return boss::Expression {intermediates.putTable(*maybeTable)};
+         } < "Range"_(Symbol_, Any_, Any_, Any_) >=
+         Description("Construct a one-column table of evenly spaced values from start "
+                     "to stop (inclusive)") > Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           auto values = range(numberArgument(dynamics, 1, "Range", "a start number"),
+                               numberArgument(dynamics, 2, "Range", "a stop number"),
+                               numberArgument(dynamics, 3, "Range", "a step number"),
+                               !std::holds_alternative<double_t>(dynamics[1]) &&
+                                   !std::holds_alternative<double_t>(dynamics[2]) &&
+                                   !std::holds_alternative<double_t>(dynamics[3]));
+           return intermediates.putTable(arrow::Table::Make(
+               arrow::schema({arrow::field(std::get<Symbol>(dynamics[0]).getName(), values->type())}),
+               {values}));
+         } < "Window"_(Any_, AnySequence_, Integer_, Symbol("Partial")) >=
+         Description("Aggregate a column (Sum, Mean, Min, Max, Count) over each row and "
+                     "the rows before it, size rows in total; the first rows are null "
+                     "unless Partial is given") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) { return windowOperator(std::move(dynamics), true); } <
+         "Window"_(Any_, AnySequence_, Integer_) >= Recurse(evaluate) >
+         [](auto, auto dynamics, auto) { return windowOperator(std::move(dynamics), false); } <
+         "ExponentialMovingAverage"_(Any_, Symbol_, "Alpha"_(Any_)) >=
+         Description("Exponentially weighted moving average of a column; (Alpha a) "
+                     "gives each new row weight a, (Span n) sets a to 2/(n+1)") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           auto [head, statics, parameters, spans] =
+               std::get<ComplexExpression>(std::move(dynamics[2])).decompose();
+           return exponentialMovingAverageOperator(
+               std::move(dynamics), numberArgument(parameters, 0, "Alpha", "a number"));
+         } < "ExponentialMovingAverage"_(Any_, Symbol_, "Span"_(Any_)) >= Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           auto [head, statics, parameters, spans] =
+               std::get<ComplexExpression>(std::move(dynamics[2])).decompose();
+           return exponentialMovingAverageOperator(
+               std::move(dynamics), 2 / (numberArgument(parameters, 0, "Span", "a number") + 1));
+         } < "Resample"_(Any_, Symbol_, AnySequence_, Any_, "Fill"_(Any_)) >=
+         Description("Aggregate grouped by a numeric key column, with one row per step "
+                     "from the smallest to the largest key; the output is sorted; keys "
+                     "without input rows get the fill value (default 0)") >
+         Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           auto [head, statics, fill, spans] =
+               std::get<ComplexExpression>(std::move(dynamics.back())).decompose();
+           dynamics.pop_back();
+           return resampleOperator(std::move(dynamics), std::move(fill[0]));
+         } < "Resample"_(Any_, Symbol_, AnySequence_, Any_) >= Recurse(evaluate) >
+         [](auto, auto dynamics, auto) {
+           return resampleOperator(std::move(dynamics), boss::Expression(int32_t(0)));
          } < "ToStatus"_(AnySequence_) >=
          Description("Evaluate a pipeline and return OK rather than "
                      "materialising the result") > Recurse(evaluate) >
@@ -555,8 +1289,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
          [](auto, auto dynamics, auto) {
            auto input = intermediates.getTable(intermediates.at(dynamics.at(0)));
            auto builder = arrow::StringBuilder {};
-           for(auto i = 0; i < input->num_columns(); i++)
-             (void)builder.Append(input->field(i)->name());
+           for(auto const& field : input->schema()->fields())
+             (void)builder.Append(field->name());
            return intermediates.putTable(arrow::Table::Make(
                arrow::schema({arrow::field("Columns", arrow::utf8(), true,
                                            arrow::key_value_metadata({"boss_type"}, {"symbol"}))}),
@@ -567,10 +1301,10 @@ static boss::Expression evaluate(boss::Expression&& e) {
          [](auto, auto dynamics, auto) {
            auto fields = std::vector<std::shared_ptr<arrow::Field>>();
            auto arrays = std::vector<std::shared_ptr<arrow::Array>>();
-           for(auto& columnExpr : dynamics) {
-             auto& column = get<ComplexExpression>(columnExpr);
-             auto columnName = column.getHead().getName();
-             auto& spanArguments = column.getSpanArguments();
+           for(auto& columnExpression : dynamics) {
+             auto [columnHead, statics, dynamicArguments, spanArguments] =
+                 get<ComplexExpression>(std::move(columnExpression)).decompose();
+             auto columnName = columnHead.getName();
              if(!spanArguments.empty()) {
                auto firstTyped =
                    std::find_if(spanArguments.begin(), spanArguments.end(), [](auto const& span) {
@@ -581,28 +1315,45 @@ static boss::Expression evaluate(boss::Expression&& e) {
                          },
                          span);
                    });
-               if(firstTyped != spanArguments.end())
+               // a column mixing integer and floating literals is promoted to float64
+               auto anyFloating =
+                   std::any_of(spanArguments.begin(), spanArguments.end(), [](auto const& span) {
+                     return std::visit(
+                         [](auto const& s) {
+                           return std::is_floating_point_v<std::remove_const_t<
+                               typename std::decay_t<decltype(s)>::element_type>>;
+                         },
+                         span);
+                   });
+               auto buildFromSpans = [&]<typename Scalar>() {
+                 withBuilder<Scalar>([&](auto&& builder, auto type) {
+                   for(auto& spanArg : spanArguments)
+                     std::visit(
+                         [&](auto& source) {
+                           using SourceScalar = std::remove_const_t<
+                               typename std::decay_t<decltype(source)>::element_type>;
+                           if constexpr(std::is_same_v<SourceScalar, Symbol>)
+                             (void)builder.AppendNulls(source.size());
+                           else if constexpr(std::is_same_v<SourceScalar, Scalar>)
+                             for(auto const& value : source)
+                               (void)builder.Append(value);
+                           else if constexpr(std::is_arithmetic_v<SourceScalar> &&
+                                             std::is_arithmetic_v<Scalar>)
+                             for(auto const& value : source)
+                               (void)builder.Append(static_cast<Scalar>(value));
+                         },
+                         spanArg);
+                   arrays.push_back(*builder.Finish());
+                   fields.push_back(arrow::field(columnName, type));
+                 });
+               };
+               if(firstTyped != spanArguments.end() && anyFloating)
+                 buildFromSpans.template operator()<double_t>();
+               else if(firstTyped != spanArguments.end())
                  std::visit(
                      [&](auto& typedSource) {
-                       using Scalar = std::remove_const_t<
-                           typename std::decay_t<decltype(typedSource)>::element_type>;
-                       withBuilder<Scalar>([&](auto&& builder, auto type) {
-                         for(auto& spanArg : spanArguments)
-                           std::visit(
-                               [&](auto& source) {
-                                 using SourceScalar = std::remove_const_t<
-                                     typename std::decay_t<decltype(source)>::element_type>;
-                                 if constexpr(std::is_same_v<SourceScalar, Symbol>)
-                                   for(auto i = 0u; i < source.size(); ++i)
-                                     (void)builder.AppendNull();
-                                 else if constexpr(std::is_same_v<SourceScalar, Scalar>)
-                                   for(auto const& value : source)
-                                     (void)builder.Append(value);
-                               },
-                               spanArg);
-                         arrays.push_back(*builder.Finish());
-                         fields.push_back(arrow::field(columnName, type));
-                       });
+                       buildFromSpans.template operator()<std::remove_const_t<
+                           typename std::decay_t<decltype(typedSource)>::element_type>>();
                      },
                      *firstTyped);
                else {
@@ -623,25 +1374,41 @@ static boss::Expression evaluate(boss::Expression&& e) {
                                   arrow::key_value_metadata({"boss_type"}, {"symbol"})));
                }
              } else {
-               auto& dynamicArguments = column.getDynamicArguments();
                auto firstNonNull =
                    std::find_if(dynamicArguments.begin(), dynamicArguments.end(),
                                 [](auto const& v) { return !std::holds_alternative<Symbol>(v); });
-               if(firstNonNull != dynamicArguments.end())
+               // a column mixing integer and floating literals is promoted to float64
+               auto anyFloating = std::any_of(
+                   dynamicArguments.begin(), dynamicArguments.end(),
+                   [](auto const& v) { return std::holds_alternative<double_t>(v); });
+               auto buildFromArguments = [&]<typename T>() {
+                 withBuilder<T>([&](auto&& builder, auto type) {
+                   for(auto& argument : dynamicArguments)
+                     visit(boss::utilities::overload(
+                               [&](Symbol const&) { (void)builder.AppendNull(); },
+                               [&]<typename Source>(Source const& value)
+                                 requires(std::is_arithmetic_v<Source> && std::is_arithmetic_v<T>)
+                               { (void)builder.Append(static_cast<T>(value)); },
+                               [&](T const& value)
+                                 requires(!std::is_arithmetic_v<T>)
+                               { (void)builder.Append(value); },
+                               [](auto const&) {
+                                 throw std::runtime_error("Table column mixes incompatible types");
+                               }),
+                           argument);
+                   arrays.push_back(*builder.Finish());
+                   fields.push_back(arrow::field(columnName, type));
+                 });
+               };
+               if(firstNonNull != dynamicArguments.end() && anyFloating)
+                 buildFromArguments.template operator()<double_t>();
+               else if(firstNonNull != dynamicArguments.end())
                  visit(boss::utilities::overload(
                            [&]<typename T>(T const&)
                                requires(std::is_arithmetic_v<T> || std::is_same_v<T, std::string>) {
-                                 withBuilder<T>([&](auto&& builder, auto type) {
-                                   for(auto& argument : dynamicArguments)
-                                     if(std::holds_alternative<Symbol>(argument))
-                                       (void)builder.AppendNull();
-                                     else
-                                       (void)builder.Append(get<T>(argument));
-                                   arrays.push_back(*builder.Finish());
-                                   fields.push_back(arrow::field(columnName, type));
-                                 });
+                                 buildFromArguments.template operator()<T>();
                                },
-                           [](auto&&) {}),
+                           [](auto const&) {}),
                        *firstNonNull);
                else {
                  auto builder = arrow::StringBuilder {};
@@ -663,8 +1430,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                boss::utilities::overload(
                    [&dynamics](std::string&& path) -> boss::Expression {
                      std::vector<std::string> columnNames;
-                     for(auto i = 1u; i < dynamics.size(); ++i)
-                       columnNames.push_back(get<Symbol>(dynamics.at(i)).getName());
+                     for(auto const& column : dynamics | std::views::drop(1))
+                       columnNames.push_back(get<Symbol>(column).getName());
 
                      auto loadOne = [&](std::string const& filePath)
                          -> arrow::Result<std::shared_ptr<arrow::Table>> {
@@ -702,8 +1469,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
                        if(extension != ".csv" && extension != ".tbl") {
                          boss::ExpressionArguments unchanged;
                          unchanged.push_back(std::move(path));
-                         for(auto i = 1u; i < dynamics.size(); ++i)
-                           unchanged.push_back(std::move(dynamics.at(i)));
+                         for(auto& argument : dynamics | std::views::drop(1))
+                           unchanged.push_back(std::move(argument));
                          return ComplexExpression("Load"_, {}, std::move(unchanged));
                        }
                      }
@@ -716,10 +1483,8 @@ static boss::Expression evaluate(boss::Expression&& e) {
 
                        std::vector<std::string> filePaths;
                        for(auto const& entry : fs::directory_iterator(path)) {
-                         if(!entry.is_regular_file())
-                           continue;
                          auto extension = entry.path().extension().string();
-                         if(extension == ".csv" || extension == ".tbl")
+                         if(entry.is_regular_file() && (extension == ".csv" || extension == ".tbl"))
                            filePaths.push_back(entry.path().string());
                        }
                        if(filePaths.empty())
@@ -791,8 +1556,13 @@ static boss::Expression evaluate(boss::Expression&& e) {
 };
 
 extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
-  auto result = new BOSSExpression {
-      .delegate = intermediates.convertResult(evaluate(std::move(e->delegate)))};
+  auto result = new BOSSExpression {.delegate = [&]() -> boss::Expression {
+    try {
+      return intermediates.convertResult(evaluate(std::move(e->delegate)));
+    } catch(std::exception const& exception) {
+      return std::string(exception.what());
+    }
+  }()};
   auto live = std::set<size_t>();
   for(auto& [name, key] : intermediates.names)
     live.insert(key);

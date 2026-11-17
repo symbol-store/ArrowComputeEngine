@@ -212,6 +212,27 @@
             (GroupBy (Table (grp 1 1 2 2) (val 1 2 3 4)) (CountAll) grp)
             (keys grp))))
 
+  (test "GroupBy: exact median and quantiles, nulls skipped, mixed with other aggregates"
+        '(Table (|sum(x)| 10) (|median(x)| 2.5) (|quantile(x)| 3.0) (|quantile(x)| 1.75))
+        (boss-eval
+          (GroupBy (Table (x 1 2 3 4 NULL))
+                   (Sum x) (Median x) (Quantile x 0.99 Lower) (Quantile x 0.25))))
+
+  (test "GroupBy: median per group"
+        '(Table (g 1 2) (|median(x)| 2.0 20.0) (|count(x)| 2 3))
+        (boss-eval
+          (OrderBy
+            (GroupBy (Table (g 1 1 2 2 2) (x 1.0 3.0 10.0 20.0 40.0)) (Median x) (Count x) g)
+            (keys g))))
+
+  (test "GroupBy: median of no rows is NULL"
+        '(Table (|median(x)| NULL))
+        (boss-eval (GroupBy (Filter (Table (x 1 2)) (Less x 0)) (Median x))))
+
+  (test "GroupBy: malformed Quantile is a readable error"
+        "Quantile expects (Quantile col q [Linear|Lower|Higher|Nearest|Midpoint])"
+        (boss-eval (GroupBy (Table (x 1 2)) (Quantile x))))
+
   ;;; Materialize
 
   (test "Materialize: preserves data"
@@ -240,6 +261,68 @@
   (test "Pairwise: diff with lag 2"
         '(Table (A 1 2 4 8) (diff NULL NULL 3 6))
         (boss-eval (Pairwise (Table (A 1 2 4 8)) diff A 2)))
+
+  ;;; Range
+
+  (test "Range: inclusive float grid"
+        '(Table (|count_all()| 21))
+        (boss-eval (GroupBy (Range x 0 10 0.5) (CountAll))))
+
+  (test "Range: integer bounds give int64"
+        '(Table (d 3 5 7 9))
+        (boss-eval (Range d 3 9 2)))
+
+  ;;; Window
+
+  (test "Window: all aggregates, strict edge, nulls ignored"
+        '(Table (p 1 3 NULL 7 2)
+                (|sum(p)| NULL 4.0 3.0 7.0 9.0)
+                (|mean(p)| NULL 2.0 3.0 7.0 4.5)
+                (|min(p)| NULL 1.0 3.0 7.0 2.0)
+                (|max(p)| NULL 3.0 3.0 7.0 7.0)
+                (|count(p)| NULL 2 1 1 2))
+        (boss-eval
+          (Window (Table (p 1 3 NULL 7 2)) (Sum p) (Mean p) (Min p) (Max p) (Count p) 2)))
+
+  (test "Window: Partial aggregates the available rows"
+        '(Table (p 1 3 NULL 7 2) (|mean(p)| 1.0 2.0 2.0 5.0 4.5))
+        (boss-eval (Window (Table (p 1 3 NULL 7 2)) (Mean p) 3 Partial)))
+
+  (test "Window: min and max"
+        '(Table (p 5 1 4 2 8 3)
+                (|min(p)| NULL NULL 1.0 1.0 2.0 2.0)
+                (|max(p)| NULL NULL 5.0 4.0 8.0 8.0))
+        (boss-eval (Window (Table (p 5 1 4 2 8 3)) (Min p) (Max p) 3)))
+
+  (test "Window: an all-null window is NULL, its count 0"
+        '(Table (p NULL NULL 4) (|min(p)| NULL NULL 4.0) (|count(p)| 0 0 1))
+        (boss-eval (Window (Table (p NULL NULL 4)) (Min p) (Count p) 2 Partial)))
+
+  (test "Window: unsupported aggregate is a readable error"
+        "Window supports (Sum col), (Mean col), (Min col), (Max col) and (Count col)"
+        (boss-eval (Window (Table (p 1)) (Median p) 2)))
+
+  ;;; ExponentialMovingAverage
+
+  (test "ExponentialMovingAverage: Alpha; null rows keep the previous average"
+        '(Table (x 10 NULL 20) (|exponential_moving_average(x)| 5.0 5.0 12.5))
+        (boss-eval (ExponentialMovingAverage (Table (x 10 NULL 20)) x (Alpha 0.5))))
+
+  (test "ExponentialMovingAverage: Span n sets alpha to 2/(n+1)"
+        '(Table (x 3 3) (|exponential_moving_average(x)| 2.0 2.6666666666666665))
+        (boss-eval (ExponentialMovingAverage (Table (x 3 3)) x (Span 2))))
+
+  ;;; Resample
+
+  (test "Resample: gaps filled with 0, in key order"
+        '(Table (d 1 2 3 4 5 6)
+                (|sum(l)| 12.0 0.0 0.0 2.0 0.0 1.5)
+                (|count_all()| 2 0 0 1 0 1))
+        (boss-eval (Resample (Table (d 1 1 4 6) (l 5 7 2 1.5)) d (Sum l) (CountAll) 1)))
+
+  (test "Resample: explicit fill value"
+        '(Table (d 1 2 3 4) (|sum(l)| 5 -1 -1 2))
+        (boss-eval (Resample (Table (d 1 4) (l 5 2)) d (Sum l) 1 (Fill -1))))
 
   ;;; Name / ByName
 
@@ -336,6 +419,134 @@
   (test "Union: empty input on one side"
         '(Table (A 1 2))
         (boss-eval (Union (Table (A 1 2)) (Filter (Table (A 9)) (Less A 0)))))
+
+  (test "Union: int32 and int64 columns widen to int64"
+        '(Table (f 1 3))
+        (boss-eval (Union (Project (Table (x 1)) (As (Int x) f)) (Table (f 3)))))
+
+  (test "Union: IfElse literal column unions with Table column"
+        '(Table (f 1 3))
+        (boss-eval
+          (Union (Project (Table (x 1.0)) (As (IfElse (Greater x 0) 1 2) f)) (Table (f 3)))))
+
+  ;;; Argument validation
+
+  (test "GroupBy: aggregate with two columns is an error"
+        "Mean expects exactly 1 argument, got 2"
+        (boss-eval (GroupBy (Table (a 1.0 2.0) (b 3.0 4.0)) (Mean a b))))
+
+  (test "GroupBy: CountAll with an argument is an error"
+        "CountAll expects exactly 0 arguments, got 1"
+        (boss-eval (GroupBy (Table (a 1 2)) (CountAll a))))
+
+  (test "Cumulate: aggregate with two columns is an error"
+        "Sum expects exactly 1 argument, got 2"
+        (boss-eval (Cumulate (Table (a 1 2) (b 3 4)) (Sum a b))))
+
+  (test "Named table survives a failed evaluation"
+        '(Table (a 1 2))
+        (begin
+          (boss-eval (Name (Table (a 1 2)) survivor))
+          (boss-eval (GroupBy (ByName survivor) (Mean a a)))
+          (boss-eval (ByName survivor))))
+
+  (test "ByName: a named 1x1 table is a scalar inside expressions (Let)"
+        '(Table (d -10.0 0.0 10.0))
+        (begin
+          (boss-eval (Name (GroupBy (Table (hr 100 110 120)) (Mean hr)) meanHr))
+          (boss-eval (Project (Table (hr 100 110 120)) (As (Subtract hr (ByName meanHr)) d)))))
+
+  (test "Scalar sub-query: zone percentages in one expression"
+        '(Table (z 1 2) (pct 25.0 75.0))
+        (boss-eval
+          (OrderBy
+            (Project (GroupBy (Table (z 1 2 2 2)) (CountAll) z)
+                     z
+                     (As (Divide (Multiply 100.0 |count_all()|)
+                                 (GroupBy (Table (z 1 2 2 2)) (CountAll)))
+                         pct))
+            (keys z))))
+
+  (test "Scalar sub-query: a table that is not 1x1 is a readable error"
+        "a table used as a value inside an expression must have exactly one row and one column, but it has 2 rows and 1 columns"
+        (boss-eval (Project (Table (hr 1)) (As (Subtract hr (Table (a 1 2))) d))))
+
+  (test "ByName: unknown name is a readable error"
+        "no table named 'nosuch'"
+        (boss-eval (ByName nosuch)))
+
+  (test "Slice: non-integer bounds leave the expression unevaluated"
+        '(Slice (Table (a 1 2)) 0 x)
+        (boss-eval (Slice (Table (a 1 2)) 0 x)))
+
+  ;;; Numeric semantics
+
+  (test "Divide: integers divide as floating point"
+        '(Table (r 1.0080803134182175))
+        (boss-eval (Project (Table (a 4084) (b 4117)) (As (Divide b a) r))))
+
+  (test "IntDivide: integers divide as integers"
+        '(Table (r 1))
+        (boss-eval (Project (Table (a 4084) (b 4117)) (As (IntDivide b a) r))))
+
+  (test "Int64: cast to int64"
+        '(Table (r 4117))
+        (boss-eval (Project (Table (b 4117.9)) (As (Int64 b) r))))
+
+  (test "Table: mixed integer and floating literals promote to float64"
+        '(Table (x 50.0 50.5))
+        (boss-eval (Table (x 50 50.5))))
+
+  (test "Modulo: the result has the sign of the divisor"
+        '(Table (r 3 3 -3 -2))
+        (boss-eval (Project (Table (x 1794699733 -7 7 -7) (n 5 5 -5 -5)) (As (Modulo x n) r))))
+
+  (test "Modulo: floating point"
+        '(Table (r 1.5 0.5))
+        (boss-eval (Project (Table (x 7.5 -7.5)) (As (Modulo x 2) r))))
+
+  ;;; Timestamps
+
+  (test "Timestamp: seconds since 1970, then hour, minute and day of the week"
+        '(Table (h 7) (m 42) (d 6))
+        (boss-eval
+          (Project (Table (t 1794728533))
+                   (As (Hour (Timestamp t)) h)
+                   (As (Minute (Timestamp t)) m)
+                   (As (DayOfWeek (Timestamp t)) d))))
+
+  (test "Timestamp: fractions of a second are dropped"
+        '(Table (s 13))
+        (boss-eval (Project (Table (t 1794728533.9)) (As (Second (Timestamp t)) s))))
+
+  (test "Timestamp: integer literal"
+        '(Table (h 7))
+        (boss-eval (Project (Table (a 1)) (As (Hour (Timestamp 1794728533)) h))))
+
+  (test "Strftime: positional format"
+        '(Table (s "15 Nov 2026 07:42"))
+        (boss-eval
+          (Project (Table (t 1794728533)) (As (Strftime (Timestamp t) "%d %b %Y %H:%M") s))))
+
+  ;;; Function options
+
+  (test "Round: positional ndigits"
+        '(Table (r 3.5))
+        (boss-eval (Project (Table (x 3.456)) (As (Round x 1) r))))
+
+  (test "Round: keyword options with Down mode"
+        '(Table (r 28.02))
+        (boss-eval
+          (Project (Table (x 28.0253)) (As (Round x (Options (ndigits 2) (round_mode Down))) r))))
+
+  (test "Round: HalfUp versus the default HalfToEven"
+        '(Table (r 3.0) (e 2.0))
+        (boss-eval
+          (Project (Table (x 2.5)) (As (Round x (Options (round_mode HalfUp))) r) (As (Round x) e))))
+
+  (test "Round: unknown option is a readable error"
+        "round has no option 'digits'"
+        (boss-eval (Project (Table (x 2.5)) (As (Round x (Options (digits 1))) r))))
 
   ;;; Composition
 

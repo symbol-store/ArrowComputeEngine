@@ -16,6 +16,7 @@ For implementation guidance, see [`EngineImplementationGuide.md`](EngineImplemen
 - **Integer literals** are int64, both in expressions and in `Table`. A `Table` column that mixes integer and floating literals is float64.
 - **Errors** are returned as a string result (e.g. `"Mean expects exactly 1 argument, got 2"`); the engine and its named tables stay alive.
 - **Malformed operators stay unevaluated.** Operator shapes are matched by pattern (e.g. `Slice(table Integer Integer)`); an expression that matches no pattern is returned unevaluated, as with any expression the engine does not handle.
+- **Unknown tables stay unevaluated.** An operator whose table argument is not a table of this engine, such as `(ByName nosuch)` or an integer that is no table handle, is returned with its arguments evaluated; `(Project (Filter (ByName nosuch) (Greater a 1)) a)` is returned as is.
 - **Auto-cast for date literals**: bare `YYYY-MM-DD` string literals appearing as the right-hand side of a comparison are auto-cast to Arrow `date32`.
 - **Output column names** for aggregates follow the form `fn(col)`, e.g. `sum(quantity)`. They become BOSS symbols that, because they contain parentheses, must be quoted with `|…|` syntax in Scheme: `|sum(quantity)|`.
 - **Pipeline composition**: every operator that consumes a "table" accepts any other operator that produces a table. There is no separate plan-builder mode.
@@ -299,7 +300,7 @@ Stores `table` under the symbol `sym` in the engine's name registry and marks it
 
 ### `ByName(sym)`
 
-Retrieves the table previously stored under `sym`. This lets the user express shared subplans as named bindings, turning a DAG edge into a tree reference.
+Retrieves the table previously stored under `sym`. This lets the user express shared subplans as named bindings, turning a DAG edge into a tree reference. A name that has no table stays unevaluated.
 
 Inside a `Filter`, `Project` or `Join` expression, a table with one row and one column stands for its value, so a named aggregate can be used like a variable:
 

@@ -526,9 +526,25 @@
         "a table used as a value inside an expression must have exactly one row and one column, but it has 2 rows and 1 columns"
         (boss-eval (Project (Table (hr 1)) (As (Subtract hr (Table (a 1 2))) d))))
 
-  (test "ByName: unknown name is a readable error"
-        "no table named 'nosuch'"
+  (test "ByName: an unknown name leaves the expression unevaluated"
+        '(ByName nosuch)
         (boss-eval (ByName nosuch)))
+
+  (test "Unknown intermediate: the plan is returned evaluated up to the unknown name"
+        '(Project (Filter (ByName nosuch) (Greater a 1)) a)
+        (boss-eval (Project (Filter (ByName nosuch) (Greater a 1)) a)))
+
+  (test "Unknown intermediate: an integer that is not a handle leaves the operator unevaluated"
+        '(Filter 42 (Greater a 1))
+        (boss-eval (Filter 42 (Greater a 1))))
+
+  (test "Unknown intermediate: a join keeps its evaluated known input"
+        '(Join 42 (Table (b 1)) (Equal a b))
+        (boss-eval (Join 42 (Table (b 1)) (Equal a b))))
+
+  (test "Unknown intermediate: an integer at the root is returned as is"
+        42
+        (boss-eval 42))
 
   (test "Slice: non-integer bounds leave the expression unevaluated"
         '(Slice (Table (a 1 2)) 0 x)
